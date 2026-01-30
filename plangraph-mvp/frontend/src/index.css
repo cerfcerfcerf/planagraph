@@ -1,0 +1,23 @@
+:root {
+  color: #0f172a;
+  background-color: #f1f5f9;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 12px;
+}
+
+p {
+  margin: 0 0 12px;
+}
