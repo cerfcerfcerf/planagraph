@@ -9,6 +9,9 @@ export type ScheduleItem = {
   priority: number;
   location: string | null;
   notes: string | null;
+  status?: string;
+  time_pref?: string | null;
+  created_at?: string | null;
 };
 
 export type PlannedItem = ScheduleItem & {
@@ -85,4 +88,8 @@ export type HistoryPlan = {
 export type HistoryResponse = {
   entries: HistoryEntry[];
   plans: HistoryPlan[];
+};
+
+export type TaskListResponse = {
+  items: ScheduleItem[];
 };

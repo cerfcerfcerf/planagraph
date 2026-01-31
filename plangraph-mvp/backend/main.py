@@ -7,7 +7,7 @@ from typing import Any, List
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
@@ -25,6 +25,9 @@ from models import (
     ReminderAckRequest,
     RemindersDueResponse,
     ScheduleItem,
+    TaskCreate,
+    TaskListResponse,
+    TaskUpdate,
 )
 from planner import plan_items
 
@@ -218,6 +221,8 @@ async def ack_reminder(reminder_id: int, request: ReminderAckRequest) -> dict[st
     elif request.action == "done":
         db.update_reminder_status(reminder_id, "done", now_value, None)
         db.insert_completion(reminder["item_id"], reminder["rule_id"], {"source": "reminder"})
+        if reminder["item_id"]:
+            db.update_item_status(reminder["item_id"], "done")
     return {"ok": True}
 
 
@@ -248,6 +253,52 @@ async def history(limit: int = 50) -> HistoryResponse:
         for row in plans
     ]
     return HistoryResponse(entries=entry_items, plans=plan_items)
+
+
+@app.get("/tasks", response_model=TaskListResponse)
+async def list_tasks(
+    date_from: str | None = Query(default=None, alias="from"),
+    date_to: str | None = Query(default=None, alias="to"),
+    status: str | None = None,
+    item_type: str | None = Query(default=None, alias="type"),
+    q: str | None = None,
+) -> TaskListResponse:
+    rows = db.list_tasks(date_from, date_to, status, item_type, q)
+    items = [ScheduleItem(**dict(row)) for row in rows]
+    return TaskListResponse(items=items)
+
+
+@app.post("/tasks", response_model=ScheduleItem)
+async def create_task(task: TaskCreate) -> ScheduleItem:
+    task_id = db.insert_task(task.model_dump())
+    row = db.fetch_task(task_id)
+    if not row:
+        raise HTTPException(status_code=500, detail="Task not found after insert")
+    return ScheduleItem(**dict(row))
+
+
+@app.patch("/tasks/{task_id}", response_model=ScheduleItem)
+async def update_task(task_id: int, task: TaskUpdate) -> ScheduleItem:
+    fields = {key: value for key, value in task.model_dump().items() if value is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields provided")
+    db.update_task(task_id, fields)
+    row = db.fetch_task(task_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return ScheduleItem(**dict(row))
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: int) -> dict[str, Any]:
+    db.delete_task(task_id)
+    return {"ok": True}
+
+
+@app.post("/tasks/{task_id}/complete")
+async def complete_task(task_id: int) -> dict[str, Any]:
+    db.complete_task(task_id)
+    return {"ok": True}
 
 
 @app.post("/habits/rules")

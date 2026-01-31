@@ -26,7 +26,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` to use the app.
+Open `http://localhost:5173` to use the app. The UI is organized into Now, Tasks, and Add screens.
 
 ## How reminders work
 

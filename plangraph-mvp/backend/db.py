@@ -52,6 +52,9 @@ def init_db() -> None:
                 priority INTEGER NOT NULL,
                 location TEXT,
                 notes TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                time_pref TEXT,
+                created_at TEXT NOT NULL,
                 FOREIGN KEY(entry_id) REFERENCES entries(id)
             );
             CREATE TABLE IF NOT EXISTS plans (
@@ -140,8 +143,8 @@ def insert_items(entry_id: int, items: Iterable[dict[str, Any]]) -> list[int]:
             cursor = conn.execute(
                 """
                 INSERT INTO items
-                (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status, time_pref, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -154,11 +157,113 @@ def insert_items(entry_id: int, items: Iterable[dict[str, Any]]) -> list[int]:
                     item.get("priority"),
                     item.get("location"),
                     item.get("notes"),
+                    item.get("status", "pending"),
+                    item.get("time_pref"),
+                    item.get("created_at") or now_iso(),
                 ),
             )
             ids.append(int(cursor.lastrowid))
         conn.commit()
     return ids
+
+
+def insert_task(task: dict[str, Any]) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO items
+            (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status, time_pref, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                None,
+                task.get("title"),
+                task.get("type"),
+                task.get("date"),
+                task.get("start_time"),
+                task.get("end_time"),
+                task.get("duration_min"),
+                task.get("priority"),
+                task.get("location"),
+                task.get("notes"),
+                task.get("status", "pending"),
+                task.get("time_pref"),
+                now_iso(),
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def list_tasks(
+    date_from: Optional[str],
+    date_to: Optional[str],
+    status: Optional[str],
+    item_type: Optional[str],
+    query: Optional[str],
+) -> list[sqlite3.Row]:
+    sql = "SELECT * FROM items"
+    clauses = []
+    params: list[Any] = []
+    if date_from:
+        clauses.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date <= ?")
+        params.append(date_to)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if item_type:
+        clauses.append("type = ?")
+        params.append(item_type)
+    if query:
+        clauses.append("(title LIKE ? OR notes LIKE ?)")
+        params.extend([f"%{query}%", f"%{query}%"])
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY date ASC, start_time ASC, created_at DESC"
+    with get_connection() as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def fetch_task(task_id: int) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM items WHERE id = ?", (task_id,)).fetchone()
+
+
+def update_task(task_id: int, fields: dict[str, Any]) -> None:
+    if not fields:
+        return
+    assignments = []
+    params: list[Any] = []
+    for key, value in fields.items():
+        assignments.append(f"{key} = ?")
+        params.append(value)
+    params.append(task_id)
+    sql = f"UPDATE items SET {', '.join(assignments)} WHERE id = ?"
+    with get_connection() as conn:
+        conn.execute(sql, params)
+        conn.commit()
+
+
+def delete_task(task_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM planned_items WHERE item_id = ?", (task_id,))
+        conn.execute("DELETE FROM items WHERE id = ?", (task_id,))
+        conn.commit()
+
+
+def complete_task(task_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (task_id,))
+        conn.commit()
+
+
+def update_item_status(item_id: int, status: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE items SET status = ? WHERE id = ?", (status, item_id))
+        conn.commit()
 
 
 def insert_plan(day: str, day_start: str, day_end: str) -> int:

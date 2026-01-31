@@ -92,7 +92,9 @@ def attach_contextual_reminders(
     parsed_items: Iterable[ScheduleItem],
 ) -> list[int]:
     reminder_ids: list[int] = []
-    anchor_items = [item for item in planned_items if item.planned_start]
+    anchor_items = [item for item in planned_items if item.planned_start and item.type == "event"]
+    if not anchor_items:
+        anchor_items = [item for item in planned_items if item.planned_start]
     anchor_items.sort(key=lambda item: item.planned_start or "99:99")
 
     for item in parsed_items:

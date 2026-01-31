@@ -21,6 +21,9 @@ class ScheduleItem(BaseModel):
     priority: int = 0
     location: Optional[str] = None
     notes: Optional[str] = None
+    status: str = "pending"
+    time_pref: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 class ParseResponse(BaseModel):
@@ -118,3 +121,35 @@ class HistoryPlan(BaseModel):
 class HistoryResponse(BaseModel):
     entries: List[HistoryEntry]
     plans: List[HistoryPlan]
+
+
+class TaskCreate(BaseModel):
+    title: str
+    type: str = Field(pattern="^(event|task|reminder)$")
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    duration_min: int = 0
+    priority: int = 0
+    location: Optional[str] = None
+    notes: Optional[str] = None
+    status: str = "pending"
+    time_pref: Optional[str] = None
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    type: Optional[str] = Field(default=None, pattern="^(event|task|reminder)$")
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    duration_min: Optional[int] = None
+    priority: Optional[int] = None
+    location: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+    time_pref: Optional[str] = None
+
+
+class TaskListResponse(BaseModel):
+    items: List[ScheduleItem]

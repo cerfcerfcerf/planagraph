@@ -50,6 +50,22 @@ curl -X POST http://localhost:8000/reminders/1/ack \
   -d '{"action":"done"}'
 ```
 
+### Tasks
+
+```bash
+curl "http://localhost:8000/tasks?from=2024-01-01&to=2024-01-07&type=task"
+
+curl -X POST http://localhost:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Quick task","type":"task","date":"2024-01-02","start_time":"10:00","duration_min":30,"priority":1}'
+
+curl -X PATCH http://localhost:8000/tasks/1 \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Updated task","priority":2}'
+
+curl -X POST http://localhost:8000/tasks/1/complete
+```
+
 ### Habits
 
 ```bash
