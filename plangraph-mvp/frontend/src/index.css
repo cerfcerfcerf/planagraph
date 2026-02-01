@@ -1,0 +1,22 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f8fafc;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 12px;
+}
+
+p {
+  margin: 0;
+}
+
+button {
+  font-family: inherit;
+}
