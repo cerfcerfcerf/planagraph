@@ -2,6 +2,7 @@ import type {
   EntryResponse,
   HabitRulesResponse,
   HistoryResponse,
+  NowResponse,
   ParseResponse,
   PlanResponse,
   RemindersResponse,
@@ -39,11 +40,19 @@ export const api = {
     }).then((res) => handleJson<PlanResponse>(res)),
   remindersDue: () =>
     fetch(`${API_URL}/reminders/due`).then((res) => handleJson<RemindersResponse>(res)),
-  ackReminder: (id: number, action: "dismiss" | "snooze" | "done", snoozeMin?: number) =>
+  now: (now?: string) =>
+    fetch(`${API_URL}/now${now ? `?now=${encodeURIComponent(now)}` : ""}`).then((res) =>
+      handleJson<NowResponse>(res)
+    ),
+  ackReminder: (
+    id: number,
+    action: "dismiss" | "snooze" | "done" | "cancel_forever" | "move",
+    options?: { snoozeMin?: number; moveTo?: string }
+  ) =>
     fetch(`${API_URL}/reminders/${id}/ack`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, snooze_min: snoozeMin }),
+      body: JSON.stringify({ action, snooze_min: options?.snoozeMin, move_to: options?.moveTo }),
     }).then((res) => handleJson<{ ok: boolean }>(res)),
   habitRules: () => fetch(`${API_URL}/habits/rules`).then((res) => handleJson<HabitRulesResponse>(res)),
   upsertHabitRule: (rule: {
@@ -90,14 +99,32 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(task),
     }).then((res) => handleJson<ScheduleItem>(res)),
+  quickAddTask: (task: { title: string; date?: string | null; time?: string | null; priority?: number; type?: "task" | "event" | "reminder" }) =>
+    fetch(`${API_URL}/tasks/quick_add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task),
+    }).then((res) => handleJson<ScheduleItem>(res)),
   updateTask: (id: number, fields: Partial<ScheduleItem>) =>
     fetch(`${API_URL}/tasks/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields),
     }).then((res) => handleJson<ScheduleItem>(res)),
+  editTask: (id: number, fields: Partial<ScheduleItem>) =>
+    fetch(`${API_URL}/tasks/${id}/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }).then((res) => handleJson<ScheduleItem>(res)),
   deleteTask: (id: number) =>
     fetch(`${API_URL}/tasks/${id}`, { method: "DELETE" }).then((res) => handleJson<{ ok: boolean }>(res)),
+  removeTask: (id: number) =>
+    fetch(`${API_URL}/tasks/${id}/delete`, { method: "POST" }).then((res) => handleJson<{ ok: boolean }>(res)),
+  disableTaskReminders: (id: number) =>
+    fetch(`${API_URL}/tasks/${id}/disable_reminders`, { method: "POST" }).then((res) =>
+      handleJson<{ ok: boolean }>(res)
+    ),
   completeTask: (id: number) =>
     fetch(`${API_URL}/tasks/${id}/complete`, { method: "POST" }).then((res) =>
       handleJson<{ ok: boolean }>(res)

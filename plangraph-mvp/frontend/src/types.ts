@@ -10,7 +10,10 @@ export type ScheduleItem = {
   location: string | null;
   notes: string | null;
   status?: string;
+  task_state?: string | null;
   time_pref?: string | null;
+  placement_hint?: string | null;
+  next_reminder_at?: string | null;
   created_at?: string | null;
 };
 
@@ -45,11 +48,23 @@ export type Reminder = {
   status: string;
   reason: string | null;
   related_item_title?: string | null;
+  context?: string | null;
 };
 
 export type RemindersResponse = {
   now: string;
   reminders: Reminder[];
+};
+
+export type NowResponse = {
+  now: string;
+  has_plan: boolean;
+  due_now: Reminder[];
+  next_six_hours: Reminder[];
+  later_today: Reminder[];
+  overlap_message?: string | null;
+  overlap_move_id?: number | null;
+  overlap_move_to?: string | null;
 };
 
 export type HabitRule = {

@@ -24,19 +24,21 @@ from models import (
     PlanResponse,
     ReminderAckRequest,
     RemindersDueResponse,
+    NowResponse,
     ScheduleItem,
     TaskCreate,
     TaskListResponse,
+    TaskQuickAdd,
     TaskUpdate,
 )
-from planner import plan_items
+from planner import derive_placement_hint, plan_items
 
 load_dotenv()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
-app = FastAPI(title="Plangraph MVP")
+app = FastAPI(title="Plangraph")
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,6 +146,10 @@ async def create_entry(request: ParseRequest) -> EntryResponse:
     items = parse_with_ollama(request.text, today_value)
     entry_id = db.insert_entry(request.text, today_value)
     item_payloads = [item.model_dump() for item in items]
+    for payload in item_payloads:
+        placement_hint = payload.get("placement_hint") or derive_placement_hint(ScheduleItem(**payload))
+        payload["placement_hint"] = placement_hint
+        payload["task_state"] = payload.get("task_state") or "pending"
     item_ids = db.insert_items(entry_id, item_payloads)
     stored_items = []
     for item, item_id in zip(items, item_ids):
@@ -162,6 +168,7 @@ async def plan_day(request: PlanRequest) -> PlanResponse:
                     "date": item.date or request.day,
                     "duration_min": int(item.duration_min or 0),
                     "priority": int(item.priority or 0),
+                    "placement_hint": item.placement_hint or derive_placement_hint(item),
                 }
             )
         )
@@ -201,9 +208,59 @@ async def reminders_due(now: str | None = None) -> RemindersDueResponse:
                 "status": row["status"],
                 "reason": row["reason"],
                 "related_item_title": row["related_item_title"],
+                "context": row["body"] or row["related_item_title"],
             }
         )
     return RemindersDueResponse(now=now_value, reminders=reminders_out)
+
+
+@app.get("/now", response_model=NowResponse)
+async def now_view(now: str | None = None) -> NowResponse:
+    now_dt = datetime.utcnow().replace(microsecond=0)
+    if now:
+        now_dt = datetime.fromisoformat(now)
+    now_value = now_dt.isoformat()
+    end_of_day = now_dt.replace(hour=23, minute=59, second=59)
+    six_hours = now_dt + timedelta(hours=6)
+
+    due_rows = db.list_due_reminders(now_value)
+    next_rows = db.list_reminders_between(now_value, min(six_hours, end_of_day).isoformat())
+    later_rows = []
+    if six_hours < end_of_day:
+        later_rows = db.list_reminders_between(six_hours.isoformat(), end_of_day.isoformat())
+
+    def map_row(row: Any) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "due_at": row["due_at"],
+            "kind": row["kind"],
+            "title": row["title"],
+            "body": row["body"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "related_item_title": row["related_item_title"],
+            "context": row["body"] or row["related_item_title"],
+        }
+
+    overlap_message = None
+    overlap_move_id = None
+    overlap_move_to = None
+    overlapping = find_overlaps([*due_rows, *next_rows])
+    if overlapping:
+        overlap_message = f"{len(overlapping) + 1} items overlap — pick which to move"
+        overlap_move_id = overlapping[0]["id"]
+        overlap_move_to = suggest_next_slot(overlapping[0]["due_at"], [*due_rows, *next_rows])
+
+    return NowResponse(
+        now=now_value,
+        has_plan=db.has_plan_for_day(now_dt.date().isoformat()),
+        due_now=[map_row(row) for row in due_rows],
+        next_six_hours=[map_row(row) for row in next_rows],
+        later_today=[map_row(row) for row in later_rows],
+        overlap_message=overlap_message,
+        overlap_move_id=overlap_move_id,
+        overlap_move_to=overlap_move_to,
+    )
 
 
 @app.post("/reminders/{reminder_id}/ack")
@@ -217,12 +274,28 @@ async def ack_reminder(reminder_id: int, request: ReminderAckRequest) -> dict[st
     elif request.action == "snooze":
         snooze_min = request.snooze_min or 10
         snoozed_until = (datetime.utcnow() + timedelta(minutes=snooze_min)).replace(microsecond=0).isoformat()
-        db.update_reminder_status(reminder_id, "pending", reminder["delivered_at"], snoozed_until)
+        db.update_reminder_schedule(reminder_id, snoozed_until, "pending")
     elif request.action == "done":
         db.update_reminder_status(reminder_id, "done", now_value, None)
         db.insert_completion(reminder["item_id"], reminder["rule_id"], {"source": "reminder"})
         if reminder["item_id"]:
-            db.update_item_status(reminder["item_id"], "done")
+            db.update_item_state(reminder["item_id"], "completed")
+    elif request.action == "cancel_forever":
+        db.update_reminder_status(reminder_id, "cancelled_forever", now_value, None)
+        suppression_key = reminders.build_suppression_key(
+            reminder["rule_id"],
+            reminder["item_id"],
+            suppression_signature(reminder),
+        )
+        db.insert_suppression(suppression_key, reminder["rule_id"])
+        if reminder["item_id"]:
+            db.suppress_item_reminders(reminder["item_id"])
+    elif request.action == "move":
+        if request.move_to:
+            move_to = request.move_to
+        else:
+            move_to = suggest_next_slot(reminder["due_at"], [reminder])
+        db.update_reminder_schedule(reminder_id, move_to, "pending")
     return {"ok": True}
 
 
@@ -270,7 +343,11 @@ async def list_tasks(
 
 @app.post("/tasks", response_model=ScheduleItem)
 async def create_task(task: TaskCreate) -> ScheduleItem:
-    task_id = db.insert_task(task.model_dump())
+    task_payload = task.model_dump()
+    task_payload["placement_hint"] = task_payload.get("placement_hint") or derive_placement_hint(
+        ScheduleItem(**{**task_payload, "task_state": task_payload.get("task_state") or "pending"})
+    )
+    task_id = db.insert_task(task_payload)
     row = db.fetch_task(task_id)
     if not row:
         raise HTTPException(status_code=500, detail="Task not found after insert")
@@ -282,6 +359,11 @@ async def update_task(task_id: int, task: TaskUpdate) -> ScheduleItem:
     fields = {key: value for key, value in task.model_dump().items() if value is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields provided")
+    if "placement_hint" not in fields and ("title" in fields or "notes" in fields):
+        existing = db.fetch_task(task_id)
+        if existing:
+            merged = {**dict(existing), **fields}
+            fields["placement_hint"] = derive_placement_hint(ScheduleItem(**merged))
     db.update_task(task_id, fields)
     row = db.fetch_task(task_id)
     if not row:
@@ -292,6 +374,51 @@ async def update_task(task_id: int, task: TaskUpdate) -> ScheduleItem:
 @app.delete("/tasks/{task_id}")
 async def delete_task(task_id: int) -> dict[str, Any]:
     db.delete_task(task_id)
+    return {"ok": True}
+
+
+@app.post("/tasks/quick_add", response_model=ScheduleItem)
+async def quick_add(task: TaskQuickAdd) -> ScheduleItem:
+    payload = {
+        "title": task.title,
+        "type": task.type,
+        "date": task.date,
+        "start_time": task.time,
+        "duration_min": 0,
+        "priority": task.priority or 1,
+        "notes": task.notes,
+        "task_state": "pending",
+    }
+    payload["placement_hint"] = derive_placement_hint(ScheduleItem(**payload))
+    task_id = db.insert_task(payload)
+    row = db.fetch_task(task_id)
+    if not row:
+        raise HTTPException(status_code=500, detail="Task not found after insert")
+    schedule_item = ScheduleItem(**dict(row))
+    if schedule_item.date and schedule_item.start_time:
+        reminders.generate_single_item_reminder(schedule_item)
+    return schedule_item
+
+
+@app.post("/tasks/{task_id}/edit", response_model=ScheduleItem)
+async def edit_task(task_id: int, task: TaskUpdate) -> ScheduleItem:
+    return await update_task(task_id, task)
+
+
+@app.post("/tasks/{task_id}/delete")
+async def remove_task(task_id: int) -> dict[str, Any]:
+    db.delete_task(task_id)
+    return {"ok": True}
+
+
+@app.post("/tasks/{task_id}/disable_reminders")
+async def disable_task_reminders(task_id: int) -> dict[str, Any]:
+    suppression_key = reminders.build_suppression_key(None, task_id, "item")
+    db.insert_suppression(suppression_key, None)
+    for signature in ("upcoming", "ending", "contextual"):
+        suppression_key = reminders.build_suppression_key(None, task_id, signature)
+        db.insert_suppression(suppression_key, None)
+    db.suppress_item_reminders(task_id)
     return {"ok": True}
 
 
@@ -339,4 +466,36 @@ async def generate_habits(day: str) -> dict[str, Any]:
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"message": "Plangraph MVP backend"}
+    return {"message": "Plangraph backend"}
+
+
+def find_overlaps(reminder_rows: list[Any]) -> list[dict[str, Any]]:
+    sorted_rows = sorted(reminder_rows, key=lambda row: row["due_at"])
+    overlaps = []
+    for idx, current in enumerate(sorted_rows):
+        for other in sorted_rows[idx + 1 :]:
+            delta = datetime.fromisoformat(other["due_at"]) - datetime.fromisoformat(current["due_at"])
+            if delta.total_seconds() <= 15 * 60:
+                overlaps.append(other)
+                break
+    return overlaps
+
+
+def suggest_next_slot(base_due_at: str, reminder_rows: list[Any]) -> str:
+    occupied = {row["due_at"] for row in reminder_rows if "due_at" in row}
+    candidate = datetime.fromisoformat(base_due_at)
+    while True:
+        candidate = candidate + timedelta(minutes=30)
+        candidate_iso = candidate.replace(microsecond=0).isoformat()
+        if candidate_iso not in occupied:
+            return candidate_iso
+
+
+def suppression_signature(reminder_row: Any) -> str:
+    if reminder_row["rule_id"]:
+        day = datetime.fromisoformat(reminder_row["due_at"]).date()
+        week_start = (day - timedelta(days=day.weekday())).isoformat()
+        return f"habit:{week_start}"
+    if reminder_row["item_id"]:
+        return "item"
+    return "general"
