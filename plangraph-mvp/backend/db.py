@@ -53,6 +53,8 @@ def init_db() -> None:
                 location TEXT,
                 notes TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                task_state TEXT NOT NULL DEFAULT 'pending',
+                placement_hint TEXT,
                 time_pref TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(entry_id) REFERENCES entries(id)
@@ -112,6 +114,13 @@ def init_db() -> None:
                 FOREIGN KEY(item_id) REFERENCES items(id),
                 FOREIGN KEY(plan_id) REFERENCES plans(id)
             );
+            CREATE TABLE IF NOT EXISTS reminder_suppressions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suppression_key TEXT NOT NULL UNIQUE,
+                rule_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(rule_id) REFERENCES reminder_rules(id)
+            );
             CREATE TABLE IF NOT EXISTS completions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 item_id INTEGER,
@@ -123,6 +132,9 @@ def init_db() -> None:
             );
             """
         )
+        ensure_column(conn, "items", "task_state", "TEXT NOT NULL DEFAULT 'pending'")
+        ensure_column(conn, "items", "placement_hint", "TEXT")
+        conn.execute("UPDATE items SET task_state = 'pending' WHERE task_state IS NULL")
         conn.commit()
 
 
@@ -143,8 +155,9 @@ def insert_items(entry_id: int, items: Iterable[dict[str, Any]]) -> list[int]:
             cursor = conn.execute(
                 """
                 INSERT INTO items
-                (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status, time_pref, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status,
+                 task_state, placement_hint, time_pref, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -158,6 +171,8 @@ def insert_items(entry_id: int, items: Iterable[dict[str, Any]]) -> list[int]:
                     item.get("location"),
                     item.get("notes"),
                     item.get("status", "pending"),
+                    item.get("task_state", "pending"),
+                    item.get("placement_hint"),
                     item.get("time_pref"),
                     item.get("created_at") or now_iso(),
                 ),
@@ -172,8 +187,9 @@ def insert_task(task: dict[str, Any]) -> int:
         cursor = conn.execute(
             """
             INSERT INTO items
-            (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status, time_pref, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (entry_id, title, type, date, start_time, end_time, duration_min, priority, location, notes, status,
+             task_state, placement_hint, time_pref, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 None,
@@ -187,6 +203,8 @@ def insert_task(task: dict[str, Any]) -> int:
                 task.get("location"),
                 task.get("notes"),
                 task.get("status", "pending"),
+                task.get("task_state", "pending"),
+                task.get("placement_hint"),
                 task.get("time_pref"),
                 now_iso(),
             ),
@@ -195,34 +213,32 @@ def insert_task(task: dict[str, Any]) -> int:
         return int(cursor.lastrowid)
 
 
-def list_tasks(
+def list_planned_items(
+    plan_id: int,
     date_from: Optional[str],
     date_to: Optional[str],
     status: Optional[str],
     item_type: Optional[str],
     query: Optional[str],
 ) -> list[sqlite3.Row]:
-    sql = "SELECT * FROM items"
-    clauses = []
-    params: list[Any] = []
+    sql = "SELECT * FROM planned_items WHERE plan_id = ?"
+    params: list[Any] = [plan_id]
     if date_from:
-        clauses.append("date >= ?")
+        sql += " AND date >= ?"
         params.append(date_from)
     if date_to:
-        clauses.append("date <= ?")
+        sql += " AND date <= ?"
         params.append(date_to)
     if status:
-        clauses.append("status = ?")
+        sql += " AND status = ?"
         params.append(status)
     if item_type:
-        clauses.append("type = ?")
+        sql += " AND type = ?"
         params.append(item_type)
     if query:
-        clauses.append("(title LIKE ? OR notes LIKE ?)")
+        sql += " AND (title LIKE ? OR notes LIKE ?)"
         params.extend([f"%{query}%", f"%{query}%"])
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY date ASC, start_time ASC, created_at DESC"
+    sql += " ORDER BY planned_start ASC, created_at DESC"
     with get_connection() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -230,6 +246,11 @@ def list_tasks(
 def fetch_task(task_id: int) -> Optional[sqlite3.Row]:
     with get_connection() as conn:
         return conn.execute("SELECT * FROM items WHERE id = ?", (task_id,)).fetchone()
+
+
+def list_items_for_day(day: str) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM items WHERE date = ?", (day,)).fetchall()
 
 
 def update_task(task_id: int, fields: dict[str, Any]) -> None:
@@ -250,19 +271,26 @@ def update_task(task_id: int, fields: dict[str, Any]) -> None:
 def delete_task(task_id: int) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM planned_items WHERE item_id = ?", (task_id,))
+        conn.execute("DELETE FROM reminder_events WHERE item_id = ?", (task_id,))
         conn.execute("DELETE FROM items WHERE id = ?", (task_id,))
         conn.commit()
 
 
 def complete_task(task_id: int) -> None:
     with get_connection() as conn:
-        conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (task_id,))
+        conn.execute("UPDATE items SET task_state = 'completed' WHERE id = ?", (task_id,))
         conn.commit()
 
 
 def update_item_status(item_id: int, status: str) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE items SET status = ? WHERE id = ?", (status, item_id))
+        conn.commit()
+
+
+def update_item_state(item_id: int, state: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE items SET task_state = ? WHERE id = ?", (state, item_id))
         conn.commit()
 
 
@@ -343,10 +371,9 @@ def list_due_reminders(now_iso_value: str) -> list[sqlite3.Row]:
             LEFT JOIN items ON items.id = re.item_id
             WHERE re.status = 'pending'
               AND re.due_at <= ?
-              AND (re.snoozed_until IS NULL OR re.snoozed_until <= ?)
             ORDER BY re.due_at ASC
             """,
-            (now_iso_value, now_iso_value),
+            (now_iso_value,),
         ).fetchall()
 
 
@@ -359,6 +386,32 @@ def update_reminder_status(reminder_id: int, status: str, delivered_at: Optional
             WHERE id = ?
             """,
             (status, delivered_at, snoozed_until, reminder_id),
+        )
+        conn.commit()
+
+
+def update_reminder_schedule(reminder_id: int, due_at: str, status: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE reminder_events
+            SET due_at = ?, status = ?, snoozed_until = NULL
+            WHERE id = ?
+            """,
+            (due_at, status, reminder_id),
+        )
+        conn.commit()
+
+
+def update_reminder_due_for_item(item_id: int, kind: str, due_at: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE reminder_events
+            SET due_at = ?, status = 'pending'
+            WHERE item_id = ? AND kind = ?
+            """,
+            (due_at, item_id, kind),
         )
         conn.commit()
 
@@ -489,3 +542,112 @@ def fetch_reminder(reminder_id: int) -> Optional[sqlite3.Row]:
             "SELECT * FROM reminder_events WHERE id = ?",
             (reminder_id,),
         ).fetchone()
+
+
+def list_reminders_between(start_iso: str, end_iso: str) -> list[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT re.*, items.title AS related_item_title
+            FROM reminder_events re
+            LEFT JOIN items ON items.id = re.item_id
+            WHERE re.status = 'pending'
+              AND re.due_at > ?
+              AND re.due_at <= ?
+            ORDER BY re.due_at ASC
+            """,
+            (start_iso, end_iso),
+        ).fetchall()
+
+
+def latest_plan_for_day(day: str) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute(
+            "SELECT id FROM plans WHERE day = ? ORDER BY created_at DESC LIMIT 1",
+            (day,),
+        ).fetchone()
+
+
+def fetch_plan(plan_id: int) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+
+
+def fetch_planned_item(planned_id: int) -> Optional[sqlite3.Row]:
+    with get_connection() as conn:
+        return conn.execute("SELECT * FROM planned_items WHERE id = ?", (planned_id,)).fetchone()
+
+
+def list_latest_plans(date_from: Optional[str], date_to: Optional[str]) -> list[sqlite3.Row]:
+    sql = """
+        SELECT p.*
+        FROM plans p
+        JOIN (
+            SELECT day, MAX(created_at) AS created_at
+            FROM plans
+    """
+    params: list[Any] = []
+    if date_from and date_to:
+        sql += " WHERE day >= ? AND day <= ?"
+        params.extend([date_from, date_to])
+    sql += " GROUP BY day) latest ON p.day = latest.day AND p.created_at = latest.created_at"
+    sql += " ORDER BY p.day ASC"
+    with get_connection() as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def delete_plan_reminders(plan_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM reminder_events WHERE plan_id = ?", (plan_id,))
+        conn.commit()
+
+
+def insert_suppression(suppression_key: str, rule_id: Optional[int]) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO reminder_suppressions (suppression_key, rule_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (suppression_key, rule_id, now_iso()),
+        )
+        conn.commit()
+
+
+def is_suppressed(suppression_key: str) -> bool:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM reminder_suppressions WHERE suppression_key = ?",
+            (suppression_key,),
+        ).fetchone()
+        return bool(row)
+
+
+def suppress_item_reminders(item_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE reminder_events SET status = 'cancelled_forever' WHERE item_id = ? AND status = 'pending'",
+            (item_id,),
+        )
+        conn.commit()
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def update_planned_item_status(planned_id: int, status: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE planned_items SET status = ? WHERE id = ?", (status, planned_id))
+        conn.commit()
+
+
+def update_planned_item_time(planned_id: int, planned_start: str, planned_end: Optional[str]) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE planned_items SET planned_start = ?, planned_end = ? WHERE id = ?",
+            (planned_start, planned_end, planned_id),
+        )
+        conn.commit()

@@ -13,7 +13,9 @@ DEFAULT_LEADS = {
     "reminder": 10,
 }
 
-ANCHOR_HINTS = ["before", "when leaving", "for school", "before school", "after school"]
+ANCHOR_HINTS = ["before", "when leaving", "leave home", "for school", "before school", "after school"]
+ESSENTIALS_HINTS = ["essentials", "don't forget", "do not forget", "remember"]
+ESSENTIALS_KEYWORDS = ["headphones", "keys", "wallet", "bottle", "passport", "charger"]
 
 
 def parse_time(value: str) -> int:
@@ -31,15 +33,54 @@ def combine_date_time(day: str, time_value: str) -> str:
     return f"{day}T{time_value}:00"
 
 
+def time_context(time_value: str) -> str:
+    minutes = parse_time(time_value)
+    if minutes < 12 * 60:
+        return "morning"
+    if minutes < 17 * 60:
+        return "afternoon"
+    return "evening"
+
+
+def reminder_message(kind: str, title: str, time_value: Optional[str], lead_min: int, context: str) -> tuple[str, str]:
+    if kind == "ending":
+        return (f"Wrap up {title} — {lead_min} minutes left.", f"{context.title()} wrap-up reminder.")
+    if kind == "contextual":
+        return (f"Before you go: {title}.", f"{context.title()} essentials reminder.")
+    if kind == "habit":
+        return (f"Keep it going: {title}.", f"{context.title()} habit reminder.")
+    if time_value:
+        return (f"It’s almost time for {title} ({time_value}).", f"{context.title()} upcoming reminder.")
+    return (f"Quick one: {title}.", f"{context.title()} reminder.")
+
+
+def build_suppression_key(rule_id: Optional[int], item_id: Optional[int], signature: str) -> str:
+    return f"{rule_id or 'none'}:{item_id or 'none'}:{signature}"
+
+
+def should_suppress(rule_id: Optional[int], item_id: Optional[int], signature: str) -> bool:
+    key = build_suppression_key(rule_id, item_id, signature)
+    if db.is_suppressed(key):
+        return True
+    if item_id:
+        item_key = build_suppression_key(rule_id, item_id, "item")
+        return db.is_suppressed(item_key)
+    return False
+
+
 def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem]) -> list[int]:
     reminder_ids: list[int] = []
     for item in planned_items:
         if not item.planned_start:
             continue
+        if should_suppress(None, item.id, "upcoming"):
+            continue
         lead_min = DEFAULT_LEADS.get(item.type, 10)
         start_minutes = parse_time(item.planned_start)
         due_minutes = max(0, start_minutes - lead_min)
         due_at = combine_date_time(item.date or "", format_time(due_minutes))
+        context = time_context(item.planned_start)
+        title, body = reminder_message("upcoming", item.title, item.planned_start, lead_min, context)
         reason = f"Reminder set {lead_min} minutes before {item.title}."
         reminder_ids.append(
             db.insert_reminder_event(
@@ -49,8 +90,8 @@ def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem])
                     "plan_id": plan_id,
                     "due_at": due_at,
                     "kind": "upcoming",
-                    "title": f"{item.title} starts soon",
-                    "body": f"Starts at {item.planned_start}.",
+                    "title": title,
+                    "body": body,
                     "status": "pending",
                     "reason": reason,
                     "created_at": db.now_iso(),
@@ -60,9 +101,13 @@ def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem])
             )
         )
         if item.planned_end and item.duration_min > 60:
+            if should_suppress(None, item.id, "ending"):
+                continue
             end_minutes = parse_time(item.planned_end)
             end_due_minutes = max(0, end_minutes - 10)
             end_due_at = combine_date_time(item.date or "", format_time(end_due_minutes))
+            end_context = time_context(item.planned_end)
+            end_title, end_body = reminder_message("ending", item.title, item.planned_end, 10, end_context)
             reminder_ids.append(
                 db.insert_reminder_event(
                     {
@@ -71,8 +116,8 @@ def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem])
                         "plan_id": plan_id,
                         "due_at": end_due_at,
                         "kind": "ending",
-                        "title": f"{item.title} ends soon",
-                        "body": f"Wrap up by {item.planned_end}.",
+                        "title": end_title,
+                        "body": end_body,
                         "status": "pending",
                         "reason": "Long event ending soon.",
                         "created_at": db.now_iso(),
@@ -100,24 +145,33 @@ def attach_contextual_reminders(
     for item in parsed_items:
         if item.type != "reminder" or item.start_time or item.end_time:
             continue
+        if should_suppress(None, item.id, "contextual"):
+            continue
         content = f"{item.title} {item.notes or ''}".lower()
         anchor = None
         reason = None
+        lead_min = 10
         if anchor_items:
             anchor = anchor_items[0]
             if any(hint in content for hint in ANCHOR_HINTS):
                 reason = f"Attached to '{anchor.title}' because the note suggests an anchor event."
             else:
                 reason = f"Attached to '{anchor.title}' because it is the first scheduled item."
+            if any(hint in content for hint in ESSENTIALS_HINTS) or any(keyword in content for keyword in ESSENTIALS_KEYWORDS):
+                reason = f"Essentials reminder anchored to '{anchor.title}'."
+                lead_min = 15
         if anchor and anchor.planned_start:
             anchor_minutes = parse_time(anchor.planned_start)
-            due_minutes = max(0, anchor_minutes - 10)
+            due_minutes = max(0, anchor_minutes - lead_min)
             due_at = combine_date_time(day, format_time(due_minutes))
         else:
             start_minutes = parse_time(day_start)
             due_minutes = start_minutes + 30
             due_at = combine_date_time(day, format_time(due_minutes))
             reason = "No anchor found; scheduled shortly after day start."
+        due_time = format_time(due_minutes)
+        context = time_context(due_time)
+        title, body = reminder_message("contextual", item.title, due_time, lead_min, context)
         reminder_ids.append(
             db.insert_reminder_event(
                 {
@@ -126,8 +180,8 @@ def attach_contextual_reminders(
                     "plan_id": plan_id,
                     "due_at": due_at,
                     "kind": "contextual",
-                    "title": item.title,
-                    "body": item.notes,
+                    "title": title,
+                    "body": body,
                     "status": "pending",
                     "reason": reason,
                     "created_at": db.now_iso(),
@@ -168,6 +222,8 @@ def generate_habit_reminders(day: str) -> list[int]:
     for rule in rules:
         if not rule["enabled"]:
             continue
+        if should_suppress(rule["id"], None, f"habit:{week_start}"):
+            continue
         target_per_week = rule["target_per_week"]
         if target_per_week:
             completed = db.count_week_completions(rule["id"], week_start, week_end)
@@ -181,7 +237,10 @@ def generate_habit_reminders(day: str) -> list[int]:
             typical_minutes = parse_time(default_time)
         lead_min = rule["lead_min"]
         due_minutes = max(0, typical_minutes - lead_min)
-        due_at = combine_date_time(day, format_time(due_minutes))
+        due_time = format_time(due_minutes)
+        due_at = combine_date_time(day, due_time)
+        context = time_context(due_time)
+        title, body = reminder_message("habit", rule["title"], due_time, lead_min, context)
         reminder_ids.append(
             db.insert_reminder_event(
                 {
@@ -190,8 +249,8 @@ def generate_habit_reminders(day: str) -> list[int]:
                     "plan_id": None,
                     "due_at": due_at,
                     "kind": "habit",
-                    "title": rule["title"],
-                    "body": "Habit reminder.",
+                    "title": title,
+                    "body": body,
                     "status": "pending",
                     "reason": "Scheduled from habit pattern.",
                     "created_at": db.now_iso(),
@@ -201,3 +260,33 @@ def generate_habit_reminders(day: str) -> list[int]:
             )
         )
     return reminder_ids
+
+
+def generate_single_item_reminder(item: ScheduleItem) -> Optional[int]:
+    if not item.date or not item.start_time:
+        return None
+    if should_suppress(None, item.id, "upcoming"):
+        return None
+    lead_min = DEFAULT_LEADS.get(item.type, 10)
+    start_minutes = parse_time(item.start_time)
+    due_minutes = max(0, start_minutes - lead_min)
+    due_time = format_time(due_minutes)
+    due_at = combine_date_time(item.date, due_time)
+    context = time_context(due_time)
+    title, body = reminder_message("upcoming", item.title, item.start_time, lead_min, context)
+    return db.insert_reminder_event(
+        {
+            "rule_id": None,
+            "item_id": item.id,
+            "plan_id": None,
+            "due_at": due_at,
+            "kind": "upcoming",
+            "title": title,
+            "body": body,
+            "status": "pending",
+            "reason": "Quick add reminder.",
+            "created_at": db.now_iso(),
+            "delivered_at": None,
+            "snoozed_until": None,
+        }
+    )

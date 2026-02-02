@@ -11,6 +11,7 @@ export type ScheduleItem = {
   notes: string | null;
   status?: string;
   time_pref?: string | null;
+  placement_hint?: string | null;
   created_at?: string | null;
 };
 
@@ -45,11 +46,20 @@ export type Reminder = {
   status: string;
   reason: string | null;
   related_item_title?: string | null;
+  context?: string | null;
 };
 
 export type RemindersResponse = {
   now: string;
   reminders: Reminder[];
+};
+
+export type NowResponse = {
+  now: string;
+  message?: string | null;
+  due_reminders: Reminder[];
+  next_items: PlannedItem[];
+  later_today: PlannedItem[];
 };
 
 export type HabitRule = {
@@ -91,5 +101,5 @@ export type HistoryResponse = {
 };
 
 export type TaskListResponse = {
-  items: ScheduleItem[];
+  items: PlannedItem[];
 };

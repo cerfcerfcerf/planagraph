@@ -1,6 +1,6 @@
-# Plangraph MVP (Infomatrix Gold)
+# Plangraph — local-first planner
 
-A local-first full-stack app that parses natural-language plans with Ollama, builds an explainable schedule, and runs a reminder + habit engine on top of SQLite persistence.
+Plangraph — local-first planner that turns natural language into reminders, surfaces what to do now, and learns when you act so future reminders are timed better.
 
 ## Prerequisites
 
@@ -26,12 +26,13 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` to use the app. The UI is organized into Now, Tasks, and Add screens.
+Open `http://localhost:5173` to use the app. The UI is organized into Now, Add, and Tasks screens.
 
-## How reminders work
+## Key features
 
-- **Event reminders** are created for each planned item with a start time (lead times by type).
-- **Contextual reminders** attach untimed reminders to the earliest anchor event.
-- **Habit reminders** learn from completions and schedule around the median completion time.
+- **Local-first**: SQLite persistence lives alongside the app.
+- **Reminders-first**: the Now screen shows what is due now, next, and later today.
+- **Learning habits**: reminder timing adapts to your completion history.
+- **Natural language input**: paste a plan or add one item in a single line.
 
 The planner is deterministic and explainable. The LLM is only used for parsing text into structured items.

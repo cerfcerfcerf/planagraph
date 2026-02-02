@@ -8,6 +8,29 @@ from models import PlannedItem, ScheduleItem
 KEYWORDS_EVENING = ["buy", "groceries", "shop", "store", "mall"]
 KEYWORDS_AFTERNOON = ["homework", "study", "assignment"]
 KEYWORDS_REMINDER = ["keys", "wallet", "headphones", "passport", "charger"]
+KEYWORDS_ERRAND = ["groceries", "grocery", "shopping", "errand", "store"]
+KEYWORDS_STUDY = ["homework", "study", "assignment", "reading"]
+KEYWORDS_HEALTH = ["gym", "workout", "doctor", "dentist", "run"]
+KEYWORDS_ADMIN = ["email", "paperwork", "bills", "forms"]
+KEYWORDS_PREP = ["prep", "prepare", "pack", "charge"]
+KEYWORDS_SOCIAL = ["dinner", "friends", "hangout", "party"]
+
+
+def derive_placement_hint(item: ScheduleItem) -> str:
+    text = f"{item.title} {item.notes or ''}".lower()
+    if any(keyword in text for keyword in KEYWORDS_ERRAND):
+        return "errand"
+    if any(keyword in text for keyword in KEYWORDS_STUDY):
+        return "study"
+    if any(keyword in text for keyword in KEYWORDS_HEALTH):
+        return "health"
+    if any(keyword in text for keyword in KEYWORDS_ADMIN):
+        return "admin"
+    if any(keyword in text for keyword in KEYWORDS_PREP):
+        return "prep"
+    if any(keyword in text for keyword in KEYWORDS_SOCIAL):
+        return "social"
+    return "general"
 
 
 def to_minutes(value: str) -> int:
@@ -24,6 +47,11 @@ def to_time(value: int) -> str:
 def default_duration(item: ScheduleItem) -> int:
     if item.duration_min > 0:
         return item.duration_min
+    text = f"{item.title} {item.notes or ''}".lower()
+    if any(keyword in text for keyword in ["pill", "pills", "med", "meds", "vitamin"]):
+        return 5
+    if item.type == "task" and item.start_time and item.duration_min == 0:
+        return 10
     if item.type == "event":
         return 60
     if item.type == "task":
@@ -31,12 +59,25 @@ def default_duration(item: ScheduleItem) -> int:
     return 5
 
 
-def infer_time_pref(item: ScheduleItem) -> str:
+def infer_time_pref(item: ScheduleItem, fixed_items: List[ScheduleItem]) -> str:
     if item.time_pref:
         return item.time_pref
     text = f"{item.title} {item.notes or ''}".lower()
     if item.type == "reminder" and not item.start_time:
         return "after_event:first"
+    placement_hint = item.placement_hint or derive_placement_hint(item)
+    if item.type == "task" and placement_hint == "errand":
+        if any("gym" in (fixed.title or "").lower() for fixed in fixed_items):
+            return "after_event:gym"
+        return "after_event:last"
+    if placement_hint == "study":
+        return "afternoon"
+    if placement_hint == "social":
+        return "evening"
+    if placement_hint == "admin":
+        return "morning"
+    if placement_hint == "prep":
+        return "morning"
     if any(keyword in text for keyword in KEYWORDS_EVENING):
         return "evening"
     if any(keyword in text for keyword in KEYWORDS_AFTERNOON):
@@ -46,21 +87,64 @@ def infer_time_pref(item: ScheduleItem) -> str:
     return "any"
 
 
+def infer_anchor_and_preference(item: ScheduleItem, fixed_items: List[ScheduleItem]) -> tuple[Optional[ScheduleItem], str]:
+    text = f"{item.title} {item.notes or ''}".lower()
+    anchor: Optional[ScheduleItem] = None
+    preference = "early"
+    matches = []
+    for fixed in fixed_items:
+        title = (fixed.title or "").lower()
+        if title and title in text:
+            matches.append(fixed)
+    if matches and "after" in text:
+        anchor = max(matches, key=lambda fixed: fixed.start_time or "00:00")
+        preference = "after_anchor"
+    elif matches and "before" in text:
+        anchor = min(matches, key=lambda fixed: fixed.start_time or "99:99")
+        preference = "before_anchor"
+    if item.type == "task" and not anchor:
+        placement_hint = item.placement_hint or derive_placement_hint(item)
+        if placement_hint == "errand":
+            gym_anchor = next((fixed for fixed in fixed_items if "gym" in (fixed.title or "").lower()), None)
+            anchor = gym_anchor or (max(fixed_items, key=lambda fixed: fixed.start_time or "00:00") if fixed_items else None)
+            preference = "after_anchor" if anchor else "late"
+    return anchor, preference
+
+
 def preferred_windows(
     pref: str,
+    anchor: Optional[ScheduleItem],
     fixed_items: List[ScheduleItem],
     day_start_min: int,
     day_end_min: int,
 ) -> List[Tuple[int, int]]:
+    if pref == "after_anchor" and anchor:
+        anchor_start = to_minutes(anchor.start_time) if anchor.start_time else day_start_min
+        anchor_end = to_minutes(anchor.end_time) if anchor.end_time else anchor_start + default_duration(anchor)
+        return [(max(day_start_min, anchor_end + 10), day_end_min)]
+    if pref == "before_anchor" and anchor:
+        anchor_start = to_minutes(anchor.start_time) if anchor.start_time else day_end_min
+        return [(day_start_min, max(day_start_min, anchor_start - 10))]
+    if pref == "late":
+        late_start = max(day_start_min, 15 * 60)
+        return [(late_start, day_end_min)]
     if pref.startswith("after_event"):
         anchor = None
-        for item in sorted(fixed_items, key=lambda fixed: fixed.start_time or "99:99"):
-            if item.start_time:
-                anchor = item
-                break
+        sorted_fixed = sorted(fixed_items, key=lambda fixed: fixed.start_time or "99:99")
+        if pref == "after_event:last":
+            anchor = sorted_fixed[-1] if sorted_fixed else None
+        elif pref == "after_event:gym":
+            for item in sorted_fixed:
+                if "gym" in (item.title or "").lower():
+                    anchor = item
+            if anchor is None and sorted_fixed:
+                anchor = sorted_fixed[-1]
+        else:
+            anchor = sorted_fixed[0] if sorted_fixed else None
         if anchor and anchor.start_time:
             anchor_start = to_minutes(anchor.start_time)
-            return [(max(day_start_min, anchor_start + 10), day_end_min)]
+            anchor_end = to_minutes(anchor.end_time) if anchor.end_time else anchor_start + default_duration(anchor)
+            return [(max(day_start_min, anchor_end + 10), day_end_min)]
         return [(day_start_min, day_end_min)]
     if pref == "morning":
         return [(max(day_start_min, 6 * 60), min(day_end_min, 12 * 60))]
@@ -121,9 +205,10 @@ def plan_items(
         duration = default_duration(item)
         start = to_minutes(item.start_time)
         end = to_minutes(item.end_time) if item.end_time else start + duration
-        time_pref = infer_time_pref(item)
-        item_payload = item.model_copy(update={"time_pref": time_pref})
-        status = "scheduled"
+        placement_hint = item.placement_hint or derive_placement_hint(item)
+        time_pref = infer_time_pref(item, fixed_items)
+        item_payload = item.model_copy(update={"time_pref": time_pref, "placement_hint": placement_hint})
+        status = "pending"
         reason = None
         if start < day_start_min or end > day_end_min:
             conflicts.append(f"{item.title} is outside day bounds")
@@ -149,8 +234,10 @@ def plan_items(
     flexible_items.sort(key=lambda item: item.priority, reverse=True)
 
     for item in flexible_items:
-        time_pref = infer_time_pref(item)
-        item_payload = item.model_copy(update={"time_pref": time_pref})
+        placement_hint = item.placement_hint or derive_placement_hint(item)
+        time_pref = infer_time_pref(item, fixed_items)
+        anchor, placement_preference = infer_anchor_and_preference(item, fixed_items)
+        item_payload = item.model_copy(update={"time_pref": time_pref, "placement_hint": placement_hint})
         if item.type == "reminder":
             planned.append(
                 PlannedItem(
@@ -163,7 +250,8 @@ def plan_items(
             )
             continue
         duration = default_duration(item)
-        pref_windows = preferred_windows(time_pref, fixed_items, day_start_min, day_end_min)
+        preferred_key = placement_preference if placement_preference != "early" else time_pref
+        pref_windows = preferred_windows(preferred_key, anchor, fixed_items, day_start_min, day_end_min)
         slot_start = find_slot(occupied, day_start_min, day_end_min, duration, pref_windows)
 
         if slot_start is not None and slot_start + duration <= day_end_min:
@@ -176,7 +264,7 @@ def plan_items(
                     **item_payload.model_dump(),
                     planned_start=to_time(planned_start),
                     planned_end=to_time(planned_end),
-                    status="scheduled",
+                    status="pending",
                     reason=f"Scheduled using preference: {time_pref}.",
                 )
             )

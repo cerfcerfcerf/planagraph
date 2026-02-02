@@ -2,9 +2,9 @@ import type {
   EntryResponse,
   HabitRulesResponse,
   HistoryResponse,
+  NowResponse,
   ParseResponse,
   PlanResponse,
-  RemindersResponse,
   ScheduleItem,
   TaskListResponse,
 } from "./types";
@@ -37,13 +37,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ day, day_start: dayStart, day_end: dayEnd, items }),
     }).then((res) => handleJson<PlanResponse>(res)),
-  remindersDue: () =>
-    fetch(`${API_URL}/reminders/due`).then((res) => handleJson<RemindersResponse>(res)),
-  ackReminder: (id: number, action: "dismiss" | "snooze" | "done", snoozeMin?: number) =>
-    fetch(`${API_URL}/reminders/${id}/ack`, {
+  now: (now?: string) =>
+    fetch(`${API_URL}/now${now ? `?now=${encodeURIComponent(now)}` : ""}`).then((res) =>
+      handleJson<NowResponse>(res)
+    ),
+  taskAction: (id: number, payload: { action: string; target: "planned" | "reminder"; reminder_id?: number; reschedule_time?: string }) =>
+    fetch(`${API_URL}/tasks/${id}/action`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, snooze_min: snoozeMin }),
+      body: JSON.stringify(payload),
     }).then((res) => handleJson<{ ok: boolean }>(res)),
   habitRules: () => fetch(`${API_URL}/habits/rules`).then((res) => handleJson<HabitRulesResponse>(res)),
   upsertHabitRule: (rule: {
@@ -61,10 +63,9 @@ export const api = {
     }).then((res) => handleJson<{ id: number }>(res)),
   history: (limit = 50) =>
     fetch(`${API_URL}/history?limit=${limit}`).then((res) => handleJson<HistoryResponse>(res)),
-  tasks: (filters: { from?: string; to?: string; status?: string; type?: string; q?: string }) => {
+  tasks: (filters: { range?: string; status?: string; type?: string; q?: string }) => {
     const params = new URLSearchParams();
-    if (filters.from) params.set("from", filters.from);
-    if (filters.to) params.set("to", filters.to);
+    if (filters.range) params.set("range", filters.range);
     if (filters.status) params.set("status", filters.status);
     if (filters.type) params.set("type", filters.type);
     if (filters.q) params.set("q", filters.q);
@@ -90,14 +91,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(task),
     }).then((res) => handleJson<ScheduleItem>(res)),
+  quickAddTask: (task: { title: string; date?: string | null; time?: string | null; priority?: number; type?: "task" | "event" | "reminder" }) =>
+    fetch(`${API_URL}/tasks/quick_add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task),
+    }).then((res) => handleJson<ScheduleItem>(res)),
   updateTask: (id: number, fields: Partial<ScheduleItem>) =>
     fetch(`${API_URL}/tasks/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields),
     }).then((res) => handleJson<ScheduleItem>(res)),
-  deleteTask: (id: number) =>
-    fetch(`${API_URL}/tasks/${id}`, { method: "DELETE" }).then((res) => handleJson<{ ok: boolean }>(res)),
   completeTask: (id: number) =>
     fetch(`${API_URL}/tasks/${id}/complete`, { method: "POST" }).then((res) =>
       handleJson<{ ok: boolean }>(res)
