@@ -22,7 +22,10 @@ class ScheduleItem(BaseModel):
     location: Optional[str] = None
     notes: Optional[str] = None
     status: str = "pending"
+    task_state: Optional[str] = "pending"
     time_pref: Optional[str] = None
+    placement_hint: Optional[str] = None
+    next_reminder_at: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -56,8 +59,9 @@ class PlanResponse(BaseModel):
 
 
 class ReminderAckRequest(BaseModel):
-    action: str = Field(pattern="^(dismiss|snooze|done)$")
+    action: str = Field(pattern="^(dismiss|snooze|done|cancel_forever|move)$")
     snooze_min: Optional[int] = None
+    move_to: Optional[str] = None
 
 
 class ReminderOut(BaseModel):
@@ -69,11 +73,23 @@ class ReminderOut(BaseModel):
     status: str
     reason: Optional[str]
     related_item_title: Optional[str] = None
+    context: Optional[str] = None
 
 
 class RemindersDueResponse(BaseModel):
     now: str
     reminders: List[ReminderOut]
+
+
+class NowResponse(BaseModel):
+    now: str
+    has_plan: bool
+    due_now: List[ReminderOut]
+    next_six_hours: List[ReminderOut]
+    later_today: List[ReminderOut]
+    overlap_message: Optional[str] = None
+    overlap_move_id: Optional[int] = None
+    overlap_move_to: Optional[str] = None
 
 
 class HabitRuleIn(BaseModel):
@@ -134,7 +150,9 @@ class TaskCreate(BaseModel):
     location: Optional[str] = None
     notes: Optional[str] = None
     status: str = "pending"
+    task_state: Optional[str] = "pending"
     time_pref: Optional[str] = None
+    placement_hint: Optional[str] = None
 
 
 class TaskUpdate(BaseModel):
@@ -148,7 +166,18 @@ class TaskUpdate(BaseModel):
     location: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+    task_state: Optional[str] = None
     time_pref: Optional[str] = None
+    placement_hint: Optional[str] = None
+
+
+class TaskQuickAdd(BaseModel):
+    title: str
+    date: Optional[str] = None
+    time: Optional[str] = None
+    priority: Optional[int] = 1
+    type: str = Field(default="task", pattern="^(event|task|reminder)$")
+    notes: Optional[str] = None
 
 
 class TaskListResponse(BaseModel):

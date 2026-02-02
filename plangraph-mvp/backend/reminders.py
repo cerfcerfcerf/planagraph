@@ -13,7 +13,8 @@ DEFAULT_LEADS = {
     "reminder": 10,
 }
 
-ANCHOR_HINTS = ["before", "when leaving", "for school", "before school", "after school"]
+ANCHOR_HINTS = ["before", "when leaving", "leave home", "for school", "before school", "after school"]
+ESSENTIALS_HINTS = ["essentials", "don't forget", "do not forget", "remember"]
 
 
 def parse_time(value: str) -> int:
@@ -31,10 +32,26 @@ def combine_date_time(day: str, time_value: str) -> str:
     return f"{day}T{time_value}:00"
 
 
+def build_suppression_key(rule_id: Optional[int], item_id: Optional[int], signature: str) -> str:
+    return f"{rule_id or 'none'}:{item_id or 'none'}:{signature}"
+
+
+def should_suppress(rule_id: Optional[int], item_id: Optional[int], signature: str) -> bool:
+    key = build_suppression_key(rule_id, item_id, signature)
+    if db.is_suppressed(key):
+        return True
+    if item_id:
+        item_key = build_suppression_key(rule_id, item_id, "item")
+        return db.is_suppressed(item_key)
+    return False
+
+
 def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem]) -> list[int]:
     reminder_ids: list[int] = []
     for item in planned_items:
         if not item.planned_start:
+            continue
+        if should_suppress(None, item.id, "upcoming"):
             continue
         lead_min = DEFAULT_LEADS.get(item.type, 10)
         start_minutes = parse_time(item.planned_start)
@@ -60,6 +77,8 @@ def generate_event_reminders(plan_id: int, planned_items: Iterable[PlannedItem])
             )
         )
         if item.planned_end and item.duration_min > 60:
+            if should_suppress(None, item.id, "ending"):
+                continue
             end_minutes = parse_time(item.planned_end)
             end_due_minutes = max(0, end_minutes - 10)
             end_due_at = combine_date_time(item.date or "", format_time(end_due_minutes))
@@ -100,6 +119,8 @@ def attach_contextual_reminders(
     for item in parsed_items:
         if item.type != "reminder" or item.start_time or item.end_time:
             continue
+        if should_suppress(None, item.id, "contextual"):
+            continue
         content = f"{item.title} {item.notes or ''}".lower()
         anchor = None
         reason = None
@@ -109,6 +130,8 @@ def attach_contextual_reminders(
                 reason = f"Attached to '{anchor.title}' because the note suggests an anchor event."
             else:
                 reason = f"Attached to '{anchor.title}' because it is the first scheduled item."
+            if any(hint in content for hint in ESSENTIALS_HINTS):
+                reason = f"Essentials reminder anchored to '{anchor.title}'."
         if anchor and anchor.planned_start:
             anchor_minutes = parse_time(anchor.planned_start)
             due_minutes = max(0, anchor_minutes - 10)
@@ -168,6 +191,8 @@ def generate_habit_reminders(day: str) -> list[int]:
     for rule in rules:
         if not rule["enabled"]:
             continue
+        if should_suppress(rule["id"], None, f"habit:{week_start}"):
+            continue
         target_per_week = rule["target_per_week"]
         if target_per_week:
             completed = db.count_week_completions(rule["id"], week_start, week_end)
@@ -201,3 +226,30 @@ def generate_habit_reminders(day: str) -> list[int]:
             )
         )
     return reminder_ids
+
+
+def generate_single_item_reminder(item: ScheduleItem) -> Optional[int]:
+    if not item.date or not item.start_time:
+        return None
+    if should_suppress(None, item.id, "upcoming"):
+        return None
+    lead_min = DEFAULT_LEADS.get(item.type, 10)
+    start_minutes = parse_time(item.start_time)
+    due_minutes = max(0, start_minutes - lead_min)
+    due_at = combine_date_time(item.date, format_time(due_minutes))
+    return db.insert_reminder_event(
+        {
+            "rule_id": None,
+            "item_id": item.id,
+            "plan_id": None,
+            "due_at": due_at,
+            "kind": "upcoming",
+            "title": f"{item.title} starts soon",
+            "body": f"Starts at {item.start_time}.",
+            "status": "pending",
+            "reason": "Quick add reminder.",
+            "created_at": db.now_iso(),
+            "delivered_at": None,
+            "snoozed_until": None,
+        }
+    )

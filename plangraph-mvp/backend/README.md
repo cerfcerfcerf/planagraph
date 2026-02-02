@@ -1,4 +1,4 @@
-# Plangraph MVP Backend
+# Plangraph Backend
 
 ## Setup
 
@@ -40,6 +40,12 @@ curl -X POST http://localhost:8000/plan \
   -d '{"day":"2024-01-02","day_start":"07:00","day_end":"21:00","items":[{"title":"School","type":"event","date":"2024-01-02","start_time":"08:00","end_time":null,"duration_min":0,"priority":2,"location":null,"notes":null},{"title":"Buy snacks","type":"task","date":"2024-01-02","start_time":null,"end_time":null,"duration_min":0,"priority":1,"location":null,"notes":null}]}'
 ```
 
+### Now feed
+
+```bash
+curl "http://localhost:8000/now?now=2024-01-02T07:20:00"
+```
+
 ### Reminders due + ack
 
 ```bash
@@ -48,6 +54,10 @@ curl "http://localhost:8000/reminders/due?now=2024-01-02T07:20:00"
 curl -X POST http://localhost:8000/reminders/1/ack \
   -H "Content-Type: application/json" \
   -d '{"action":"done"}'
+
+curl -X POST http://localhost:8000/reminders/1/ack \
+  -H "Content-Type: application/json" \
+  -d '{"action":"cancel_forever"}'
 ```
 
 ### Tasks
@@ -55,15 +65,19 @@ curl -X POST http://localhost:8000/reminders/1/ack \
 ```bash
 curl "http://localhost:8000/tasks?from=2024-01-01&to=2024-01-07&type=task"
 
-curl -X POST http://localhost:8000/tasks \
+curl -X POST http://localhost:8000/tasks/quick_add \
   -H "Content-Type: application/json" \
-  -d '{"title":"Quick task","type":"task","date":"2024-01-02","start_time":"10:00","duration_min":30,"priority":1}'
+  -d '{"title":"Quick task","date":"2024-01-02","time":"10:00","priority":1}'
 
 curl -X PATCH http://localhost:8000/tasks/1 \
   -H "Content-Type: application/json" \
   -d '{"title":"Updated task","priority":2}'
 
-curl -X POST http://localhost:8000/tasks/1/complete
+curl -X POST http://localhost:8000/tasks/1/edit \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Updated task","priority":2}'
+
+curl -X POST http://localhost:8000/tasks/1/delete
 ```
 
 ### Habits
@@ -83,17 +97,3 @@ curl "http://localhost:8000/history?limit=10"
 ```
 
 The planner is deterministic and explainable. The LLM is only used for parsing text into structured items.
-
-## Research-style notes
-
-**Hypothesis**: adaptive reminders reduce forgetting by anchoring them to real events and learning habitual times.
-
-**Method**:
-- Event anchors: planned items generate reminders with clear lead times.
-- Contextual reminders: time-less reminders attach to the earliest anchor in the plan.
-- Habit learning: for each habit rule, the system learns the median completion time and schedules future reminders accordingly.
-
-**Evaluation (demo scenarios)**:
-- *School day*: "School at 8" creates a 7:45 reminder; "Don’t forget headphones" attaches to the school anchor.
-- *Medication*: after four marked completions, the reminder shifts to the learned median time.
-- *Gym 3x/week*: the rule schedules on spaced weekdays and skips once the weekly target is met.
