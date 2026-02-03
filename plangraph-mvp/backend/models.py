@@ -1,155 +1,67 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from datetime import datetime
 
-from pydantic import BaseModel, Field
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
-class ParseRequest(BaseModel):
-    text: str
-    today: Optional[str] = None
+from database import Base
 
 
-class ScheduleItem(BaseModel):
-    id: Optional[int] = None
-    title: str
-    type: str = Field(pattern="^(event|task|reminder)$")
-    date: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    duration_min: int = 0
-    priority: int = 0
-    location: Optional[str] = None
-    notes: Optional[str] = None
-    status: str = "pending"
-    time_pref: Optional[str] = None
-    created_at: Optional[str] = None
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    priority: Mapped[str] = mapped_column(String(16), default="med")
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    recurrence: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    recurrence_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    reminders: Mapped[list[Reminder]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
 
 
-class ParseResponse(BaseModel):
-    items: List[ScheduleItem]
+class Reminder(Base):
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), default="scheduled")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    task: Mapped[Task] = relationship(back_populates="reminders")
 
 
-class EntryResponse(BaseModel):
-    entry_id: int
-    items: List[ScheduleItem]
+class Event(Base):
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    reminder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("reminders.id"), nullable=True
+    )
+    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
-class PlanRequest(BaseModel):
-    day: str
-    day_start: str
-    day_end: str
-    items: List[ScheduleItem]
+class Settings(Base):
+    __tablename__ = "settings"
 
-
-class PlannedItem(ScheduleItem):
-    planned_start: Optional[str] = None
-    planned_end: Optional[str] = None
-    status: str
-    reason: Optional[str] = None
-
-
-class PlanResponse(BaseModel):
-    day: str
-    planned: List[PlannedItem]
-    conflicts: List[str]
-
-
-class ReminderAckRequest(BaseModel):
-    action: str = Field(pattern="^(dismiss|snooze|done)$")
-    snooze_min: Optional[int] = None
-
-
-class ReminderOut(BaseModel):
-    id: int
-    due_at: str
-    kind: str
-    title: str
-    body: Optional[str]
-    status: str
-    reason: Optional[str]
-    related_item_title: Optional[str] = None
-
-
-class RemindersDueResponse(BaseModel):
-    now: str
-    reminders: List[ReminderOut]
-
-
-class HabitRuleIn(BaseModel):
-    key: str
-    title: str
-    lead_min: int = 10
-    enabled: bool = True
-    default_time: Optional[str] = None
-    target_per_week: Optional[int] = None
-
-
-class HabitRuleOut(BaseModel):
-    id: int
-    key: str
-    title: str
-    lead_min: int
-    enabled: bool
-    default_time: Optional[str]
-    target_per_week: Optional[int]
-    typical_time: Optional[str]
-
-
-class HabitRulesResponse(BaseModel):
-    rules: List[HabitRuleOut]
-
-
-class HistoryEntry(BaseModel):
-    id: int
-    text: str
-    today: Optional[str]
-    created_at: str
-    item_count: int
-
-
-class HistoryPlan(BaseModel):
-    id: int
-    day: str
-    day_start: str
-    day_end: str
-    created_at: str
-    planned_count: int
-    unscheduled_count: int
-
-
-class HistoryResponse(BaseModel):
-    entries: List[HistoryEntry]
-    plans: List[HistoryPlan]
-
-
-class TaskCreate(BaseModel):
-    title: str
-    type: str = Field(pattern="^(event|task|reminder)$")
-    date: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    duration_min: int = 0
-    priority: int = 0
-    location: Optional[str] = None
-    notes: Optional[str] = None
-    status: str = "pending"
-    time_pref: Optional[str] = None
-
-
-class TaskUpdate(BaseModel):
-    title: Optional[str] = None
-    type: Optional[str] = Field(default=None, pattern="^(event|task|reminder)$")
-    date: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    duration_min: Optional[int] = None
-    priority: Optional[int] = None
-    location: Optional[str] = None
-    notes: Optional[str] = None
-    status: Optional[str] = None
-    time_pref: Optional[str] = None
-
-
-class TaskListResponse(BaseModel):
-    items: List[ScheduleItem]
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    policy_mode: Mapped[str] = mapped_column(String(16), default="adaptive")
+    daily_budget: Mapped[int] = mapped_column(Integer, default=6)
+    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), default="23:30")
+    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), default="07:00")
+    lead_time_minutes: Mapped[int] = mapped_column(Integer, default=20)

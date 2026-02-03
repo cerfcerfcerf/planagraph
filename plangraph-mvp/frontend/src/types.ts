@@ -1,95 +1,77 @@
-export type ScheduleItem = {
-  id?: number | null;
+export type ParseItem = {
   title: string;
-  type: "event" | "task" | "reminder";
   date: string | null;
-  start_time: string | null;
-  end_time: string | null;
-  duration_min: number;
-  priority: number;
-  location: string | null;
+  due_time: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  priority: "low" | "med" | "high";
+  recurrence: "none" | "daily" | "weekly" | "every_2_days" | "custom";
+  recurrence_detail: string | null;
+  confidence: number;
   notes: string | null;
-  status?: string;
-  time_pref?: string | null;
-  created_at?: string | null;
 };
 
-export type PlannedItem = ScheduleItem & {
-  planned_start: string | null;
-  planned_end: string | null;
-  status: string;
-  reason: string | null;
+export type Task = {
+  id: number;
+  title: string;
+  notes: string | null;
+  due_at: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  priority: "low" | "med" | "high";
+  status: "active" | "completed" | "archived";
+  recurrence: string | null;
+  recurrence_detail: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
-export type ParseResponse = {
-  items: ScheduleItem[];
-};
-
-export type EntryResponse = {
-  entry_id: number;
-  items: ScheduleItem[];
-};
-
-export type PlanResponse = {
-  day: string;
-  planned: PlannedItem[];
-  conflicts: string[];
+export type Settings = {
+  policy_mode: "baseline" | "adaptive";
+  daily_budget: number;
+  quiet_hours_start: string | null;
+  quiet_hours_end: string | null;
+  lead_time_minutes: number;
 };
 
 export type Reminder = {
   id: number;
-  due_at: string;
-  kind: string;
+  task_id: number;
+  scheduled_for: string;
+  state: string;
+};
+
+export type NowAction = {
+  reminder_id: number | null;
+  task_id: number | null;
   title: string;
-  body: string | null;
-  status: string;
-  reason: string | null;
-  related_item_title?: string | null;
+  scheduled_for: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  priority: string;
+  why_now: string;
 };
 
-export type RemindersResponse = {
-  now: string;
-  reminders: Reminder[];
+export type NowResponse = {
+  next_best_action: NowAction | null;
+  next_6_hours: Reminder[];
+  later_today: Reminder[];
 };
 
-export type HabitRule = {
-  id: number;
-  key: string;
-  title: string;
-  lead_min: number;
-  enabled: boolean;
-  default_time: string | null;
-  target_per_week: number | null;
-  typical_time: string | null;
+export type InsightsResponse = {
+  notifications_per_day: { date: string; value: number }[];
+  completions_per_day: { date: string; value: number }[];
+  missed_rate_proxy: { date: string; value: number }[];
+  notifications_per_completion: { date: string; value: number }[];
 };
 
-export type HabitRulesResponse = {
-  rules: HabitRule[];
-};
-
-export type HistoryEntry = {
-  id: number;
-  text: string;
-  today: string | null;
-  created_at: string;
-  item_count: number;
-};
-
-export type HistoryPlan = {
-  id: number;
-  day: string;
-  day_start: string;
-  day_end: string;
-  created_at: string;
-  planned_count: number;
-  unscheduled_count: number;
-};
-
-export type HistoryResponse = {
-  entries: HistoryEntry[];
-  plans: HistoryPlan[];
-};
-
-export type TaskListResponse = {
-  items: ScheduleItem[];
+export type InsightsSummary = {
+  narrative: string;
+  recommendations: string[];
+  metrics: {
+    completion_rate: number;
+    notifications_per_day: number;
+    notifications_per_completion: number;
+    missed_rate_proxy: number;
+  };
 };
