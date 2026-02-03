@@ -1,22 +1,15 @@
-* {
-  box-sizing: border-box;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
 }
 
 body {
-  margin: 0;
-  background: #f8fafc;
+  @apply bg-slate-950 text-slate-100 font-sans;
 }
 
-h1,
-h2,
-h3 {
-  margin: 0 0 12px;
-}
-
-p {
-  margin: 0;
-}
-
-button {
-  font-family: inherit;
+input, textarea, select {
+  @apply text-slate-900;
 }
