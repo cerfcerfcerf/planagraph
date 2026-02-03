@@ -1,22 +1,16 @@
-* {
-  box-sizing: border-box;
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 body {
-  margin: 0;
-  background: #f8fafc;
+  @apply bg-mist text-ink;
+  font-family: "Inter", system-ui, sans-serif;
 }
 
-h1,
-h2,
-h3 {
-  margin: 0 0 12px;
-}
-
-p {
-  margin: 0;
+input, textarea, select {
+  @apply border border-slate-200 rounded-lg px-3 py-2 text-sm;
 }
 
 button {
-  font-family: inherit;
+  @apply text-sm font-semibold;
 }
