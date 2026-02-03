@@ -1,4 +1,11 @@
-import type { InsightsResponse, NowResponse, ParseItem, Settings, Task } from "./types";
+import type {
+  InsightsResponse,
+  InsightsSummary,
+  NowResponse,
+  ParseItem,
+  Settings,
+  Task,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
@@ -62,4 +69,12 @@ export function reminderAction(id: number, action: string) {
 
 export function fetchInsights(): Promise<InsightsResponse> {
   return request("/insights");
+}
+
+export function fetchInsightsSummary(): Promise<InsightsSummary> {
+  return request("/insights/summary");
+}
+
+export function fetchConfig(): Promise<{ use_llm: boolean }> {
+  return request("/config");
 }

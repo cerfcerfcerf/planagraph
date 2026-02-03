@@ -60,8 +60,8 @@ class Settings(Base):
     __tablename__ = "settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    policy_mode: Mapped[str] = mapped_column(String(16), default="baseline")
+    policy_mode: Mapped[str] = mapped_column(String(16), default="adaptive")
     daily_budget: Mapped[int] = mapped_column(Integer, default=6)
-    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
-    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
-    lead_time_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), default="23:30")
+    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), default="07:00")
+    lead_time_minutes: Mapped[int] = mapped_column(Integer, default=20)

@@ -125,3 +125,9 @@ class InsightsResponse(BaseModel):
     completions_per_day: list[dict]
     missed_rate_proxy: list[dict]
     notifications_per_completion: list[dict]
+
+
+class InsightsSummaryResponse(BaseModel):
+    narrative: str
+    recommendations: list[str]
+    metrics: dict[str, float]

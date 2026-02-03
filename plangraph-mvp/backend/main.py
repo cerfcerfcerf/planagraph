@@ -15,11 +15,12 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, init_db
 from llm_client import LLMClient
 from models import Event, Reminder, Task
-from parser import deterministic_parse
+from parser import deterministic_parse, priority_from_text
 from policy import get_settings, schedule_reminder
 from scheduler import ReminderScheduler
 from schemas import (
     InsightsResponse,
+    InsightsSummaryResponse,
     NowAction,
     NowResponse,
     ParseRequest,
@@ -83,7 +84,15 @@ def _parse_llm_items(text: str) -> list[dict[str, Any]] | None:
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         parsed = json.loads(content)
         validated = ParseResponse.model_validate(parsed)
-        return [item.model_dump() for item in validated.items]
+        items = []
+        for item in validated.items:
+            payload = item.model_dump()
+            if payload.get("priority") not in {"low", "med", "high"}:
+                payload["priority"] = priority_from_text(
+                    f"{payload.get('title', '')} {payload.get('notes', '')}"
+                )
+            items.append(payload)
+        return items
     except (RuntimeError, json.JSONDecodeError, ValidationError):
         return None
 
@@ -100,6 +109,11 @@ def _parse_text(text: str) -> ParseResponse:
 @app.post("/parse", response_model=ParseResponse)
 async def parse_text(request: ParseRequest) -> ParseResponse:
     return _parse_text(request.text)
+
+
+@app.get("/config")
+async def config() -> dict[str, Any]:
+    return {"use_llm": USE_LLM}
 
 
 @app.get("/tasks", response_model=TaskListResponse)
@@ -162,11 +176,6 @@ async def update_settings(
     db.commit()
     db.refresh(settings)
     return SettingsOut.model_validate(settings)
-
-
-def _summarize_action(reminder: Reminder, task: Task) -> str:
-    when = reminder.scheduled_for.strftime("%H:%M")
-    return f"{task.title} at {when}"
 
 
 def _generate_why_now(task: Task, reminder: Reminder | None) -> str:
@@ -271,39 +280,44 @@ async def reminder_action(
 
 @app.get("/insights", response_model=InsightsResponse)
 async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
-    events = db.execute(select(Event).order_by(Event.ts.asc())).scalars().all()
-    daily: dict[str, dict[str, int]] = {}
+    now = datetime.utcnow().date()
+    start_day = now - timedelta(days=6)
+    days = [(start_day + timedelta(days=idx)).isoformat() for idx in range(7)]
+    events = (
+        db.execute(select(Event).where(Event.ts >= datetime.combine(start_day, datetime.min.time())))
+        .scalars()
+        .all()
+    )
+    daily: dict[str, dict[str, int]] = {
+        day: {"notifications": 0, "completions": 0, "sent": 0} for day in days
+    }
     for event in events:
         day = event.ts.date().isoformat()
-        daily.setdefault(day, {"notifications": 0, "completions": 0, "sent": 0})
+        if day not in daily:
+            continue
         if event.type == "reminder_sent":
             daily[day]["notifications"] += 1
             daily[day]["sent"] += 1
         if event.type == "task_done":
             daily[day]["completions"] += 1
     notifications_per_day = [
-        {"date": day, "value": values["notifications"]}
-        for day, values in daily.items()
+        {"date": day, "value": daily[day]["notifications"]} for day in days
     ]
     completions_per_day = [
-        {"date": day, "value": values["completions"]}
-        for day, values in daily.items()
+        {"date": day, "value": daily[day]["completions"]} for day in days
     ]
     missed_rate_proxy = [
-        {
-            "date": day,
-            "value": max(values["notifications"] - values["completions"], 0),
-        }
-        for day, values in daily.items()
+        {"date": day, "value": max(daily[day]["notifications"] - daily[day]["completions"], 0)}
+        for day in days
     ]
     notifications_per_completion = [
         {
             "date": day,
-            "value": values["notifications"] / values["completions"]
-            if values["completions"]
-            else values["notifications"],
+            "value": daily[day]["notifications"] / daily[day]["completions"]
+            if daily[day]["completions"]
+            else daily[day]["notifications"],
         }
-        for day, values in daily.items()
+        for day in days
     ]
     return InsightsResponse(
         notifications_per_day=notifications_per_day,
@@ -313,19 +327,81 @@ async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
     )
 
 
+@app.get("/insights/summary", response_model=InsightsSummaryResponse)
+async def insights_summary(db: Session = Depends(get_db)) -> InsightsSummaryResponse:
+    insights_payload = await insights(db)
+    total_notifications = sum(item["value"] for item in insights_payload.notifications_per_day)
+    total_completions = sum(item["value"] for item in insights_payload.completions_per_day)
+    completion_rate = (
+        total_completions / total_notifications if total_notifications else 0.0
+    )
+    notifications_per_day = total_notifications / 7
+    notifications_per_completion = (
+        total_notifications / total_completions if total_completions else total_notifications
+    )
+    missed_rate = sum(item["value"] for item in insights_payload.missed_rate_proxy) / 7
+    metrics = {
+        "completion_rate": round(completion_rate, 2),
+        "notifications_per_day": round(notifications_per_day, 2),
+        "notifications_per_completion": round(notifications_per_completion, 2),
+        "missed_rate_proxy": round(missed_rate, 2),
+    }
+    if USE_LLM:
+        try:
+            response = LLMClient().summarize_insights(metrics)
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            parsed = json.loads(content)
+            narrative = parsed.get("narrative", "")
+            recommendations = parsed.get("recommendations", [])
+            if narrative and isinstance(recommendations, list) and recommendations:
+                return InsightsSummaryResponse(
+                    narrative=narrative,
+                    recommendations=recommendations[:3],
+                    metrics=metrics,
+                )
+        except (RuntimeError, json.JSONDecodeError):
+            pass
+    narrative = (
+        "This week shows a steady rhythm of reminders and completions. "
+        f"Completion rate averaged {metrics['completion_rate'] * 100:.0f}% with "
+        f"{metrics['notifications_per_day']} notifications per day. "
+        "Use the missed-rate proxy to see where nudges might be too early. "
+        "Keep experiments small and adjust settings weekly."
+    )
+    recommendations = [
+        "Schedule high-priority work in your strongest hours.",
+        "Reduce notification budget if completions lag.",
+        "Use flexible windows for tasks without fixed times.",
+    ]
+    return InsightsSummaryResponse(
+        narrative=narrative,
+        recommendations=recommendations,
+        metrics=metrics,
+    )
+
+
 @app.post("/seed")
 async def seed(db: Session = Depends(get_db)) -> dict[str, Any]:
     if os.getenv("APP_ENV") != "dev":
         raise HTTPException(status_code=403, detail="Seed disabled")
-    sample_tasks = [
-        Task(title="Review weekly goals", priority="high"),
-        Task(title="Walk and stretch", priority="med"),
-        Task(title="Plan tomorrow", priority="low"),
-    ]
+    base_day = datetime.utcnow().date() - timedelta(days=6)
+    sample_tasks = []
+    for idx in range(7):
+        day = base_day + timedelta(days=idx)
+        sample_tasks.append(
+            Task(
+                title=f"Daily review {day.isoformat()}",
+                priority="med",
+                due_at=datetime.combine(day, datetime.min.time()) + timedelta(hours=18),
+            )
+        )
     for task in sample_tasks:
         db.add(task)
         db.flush()
         db.add(Event(type="task_created", task_id=task.id, reminder_id=None))
+        db.add(Event(type="reminder_sent", task_id=task.id, reminder_id=None, ts=task.due_at))
+        if task.due_at and task.due_at.date() <= datetime.utcnow().date():
+            db.add(Event(type="task_done", task_id=task.id, reminder_id=None, ts=task.due_at))
         schedule_reminder(db, task)
     db.commit()
     return {"ok": True, "tasks": len(sample_tasks)}

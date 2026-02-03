@@ -77,3 +77,25 @@ class LLMClient:
         data = self._post(payload)
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return content.strip()
+
+    def summarize_insights(self, metrics: dict[str, float]) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an assistant that writes concise weekly summaries. "
+                        "Respond with JSON containing keys: narrative (4-6 sentences) "
+                        "and recommendations (list of 3 short items)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Metrics: {metrics}. Focus on trends and next steps.",
+                },
+            ],
+            "temperature": 0.4,
+            "response_format": {"type": "json_object"},
+        }
+        return self._post(payload)

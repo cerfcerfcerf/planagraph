@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createTasks,
+  fetchConfig,
   fetchInsights,
+  fetchInsightsSummary,
   fetchNow,
   fetchSettings,
   listTasks,
@@ -10,7 +12,14 @@ import {
   updateSettings,
   updateTask,
 } from "./api";
-import type { InsightsResponse, NowResponse, ParseItem, Settings, Task } from "./types";
+import type {
+  InsightsResponse,
+  InsightsSummary,
+  NowResponse,
+  ParseItem,
+  Settings,
+  Task,
+} from "./types";
 import {
   Area,
   AreaChart,
@@ -24,6 +33,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { format, parseISO } from "date-fns";
 
 const pages = ["Now", "Add", "Tasks", "Policy", "Insights"] as const;
 
@@ -34,18 +44,57 @@ function combineDateTime(dateValue: string | null, timeValue: string | null) {
   return new Date(`${dateValue}T${timeValue}:00`).toISOString();
 }
 
+function formatTaskTime(task: Task) {
+  if (task.due_at) {
+    return format(parseISO(task.due_at), "EEE, MMM d · HH:mm");
+  }
+  if (task.window_start && task.window_end) {
+    const start = parseISO(task.window_start);
+    const end = parseISO(task.window_end);
+    const today = new Date().toISOString().slice(0, 10);
+    if (task.window_start.slice(0, 10) === task.window_end.slice(0, 10)) {
+      const timeLabel = `${format(start, "HH:mm")}–${format(end, "HH:mm")}`;
+      if (task.window_start.slice(0, 10) === today) {
+        return timeLabel;
+      }
+      const dateLabel = format(start, "EEE, MMM d");
+      return `${dateLabel} · ${timeLabel} (flexible)`;
+    }
+    const dateLabel = format(start, "EEE, MMM d");
+    const timeLabel = `${format(start, "HH:mm")}–${format(end, "HH:mm")}`;
+    return `${dateLabel} · ${timeLabel} (flexible)`;
+  }
+  return "Flexible";
+}
+
+function formatReminderTime(value: string) {
+  return format(parseISO(value), "EEE, MMM d · HH:mm");
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("Now");
   const [parseText, setParseText] = useState("");
   const [parsedItems, setParsedItems] = useState<ParseItem[]>([]);
   const [isParsing, setIsParsing] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [taskFilter, setTaskFilter] = useState<"today" | "next7" | "all">("today");
   const [taskSearch, setTaskSearch] = useState("");
   const [laterOpen, setLaterOpen] = useState(true);
+  const [tasksOpen, setTasksOpen] = useState({
+    today: true,
+    tomorrow: true,
+    later: true,
+    completed: false,
+  });
   const [settings, setSettings] = useState<Settings | null>(null);
   const [now, setNow] = useState<NowResponse | null>(null);
   const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [summary, setSummary] = useState<InsightsSummary | null>(null);
+  const [useLlm, setUseLlm] = useState(false);
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [quickAddText, setQuickAddText] = useState("");
+  const [isDictating, setIsDictating] = useState(false);
+  const [lazyTask, setLazyTask] = useState<Task | null>(null);
+  const [lazySuggestion, setLazySuggestion] = useState<string[]>([]);
   const notifiedIds = useRef(new Set<number>());
 
   const refreshTasks = () => listTasks().then((data) => setTasks(data.tasks));
@@ -56,11 +105,17 @@ export default function App() {
 
   const refreshInsights = () => fetchInsights().then(setInsights);
 
+  const refreshSummary = () => fetchInsightsSummary().then(setSummary);
+
+  const refreshConfig = () => fetchConfig().then((data) => setUseLlm(data.use_llm));
+
   useEffect(() => {
     refreshTasks();
     refreshSettings();
     refreshNow();
     refreshInsights();
+    refreshSummary();
+    refreshConfig();
   }, []);
 
   useEffect(() => {
@@ -89,10 +144,15 @@ export default function App() {
     }
   }, [now]);
 
-  const filteredTasks = useMemo(() => {
+  useEffect(() => {
+    if (!lazyTask) return;
+    setLazySuggestion(buildLazySuggestions(lazyTask));
+  }, [lazyTask]);
+
+  const groupedTasks = useMemo(() => {
     const nowDate = new Date();
     const today = nowDate.toISOString().slice(0, 10);
-    const nextWeek = new Date(nowDate.getTime() + 7 * 24 * 60 * 60 * 1000)
+    const tomorrow = new Date(nowDate.getTime() + 24 * 60 * 60 * 1000)
       .toISOString()
       .slice(0, 10);
     const mapped = tasks.map((task) => ({
@@ -100,21 +160,24 @@ export default function App() {
       dueDate: task.due_at?.slice(0, 10) ?? task.window_start?.slice(0, 10),
       dueTime: task.due_at?.slice(11, 16) ?? task.window_start?.slice(11, 16),
       isToday: (task.due_at?.slice(0, 10) ?? "") === today,
-      isNext7:
-        (task.due_at?.slice(0, 10) ?? task.window_start?.slice(0, 10) ?? "") <=
-        nextWeek,
+      isTomorrow: (task.due_at?.slice(0, 10) ?? "") === tomorrow,
     }));
     const searched = mapped.filter((task) =>
       task.title.toLowerCase().includes(taskSearch.toLowerCase())
     );
-    if (taskFilter === "today") {
-      return searched.filter((task) => task.isToday);
-    }
-    if (taskFilter === "next7") {
-      return searched.filter((task) => task.isNext7);
-    }
-    return searched;
-  }, [tasks, taskFilter, taskSearch]);
+    return {
+      today: searched.filter(
+        (task) => task.status === "active" && task.isToday
+      ),
+      tomorrow: searched.filter(
+        (task) => task.status === "active" && task.isTomorrow
+      ),
+      later: searched.filter(
+        (task) => task.status === "active" && !task.isToday && !task.isTomorrow
+      ),
+      completed: searched.filter((task) => task.status === "completed"),
+    };
+  }, [tasks, taskSearch]);
 
   async function handleParse() {
     setIsParsing(true);
@@ -124,6 +187,111 @@ export default function App() {
     } finally {
       setIsParsing(false);
     }
+  }
+
+  const speechSupported =
+    typeof window !== "undefined" &&
+    ("SpeechRecognition" in window || "webkitSpeechRecognition" in window);
+
+  function startDictation() {
+    if (!speechSupported) return;
+    const SpeechRecognition =
+      (window as { SpeechRecognition?: unknown }).SpeechRecognition ||
+      (window as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    const recognition = new (SpeechRecognition as new () => SpeechRecognition)();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => setIsDictating(true);
+    recognition.onend = () => setIsDictating(false);
+    recognition.onerror = () => setIsDictating(false);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setQuickAddText((prev) => `${prev} ${transcript}`.trim());
+    };
+    recognition.start();
+  }
+
+  async function handleQuickAddParse() {
+    if (!quickAddText.trim()) return;
+    setIsParsing(true);
+    try {
+      const response = await parsePlan(quickAddText);
+      setParsedItems(response.items);
+      setParseText(quickAddText);
+      setQuickAddText("");
+      setQuickAddOpen(false);
+      setPage("Add");
+    } finally {
+      setIsParsing(false);
+    }
+  }
+
+  function buildLazySuggestions(task: Task) {
+    const suggestions = [
+      "Reschedule to tomorrow",
+      "Shrink to a 30-minute focus block",
+      "Skip and archive for now",
+    ];
+    if (useLlm) {
+      return suggestions;
+    }
+    return suggestions;
+  }
+
+  async function handleLazyAction(action: "reschedule" | "shrink" | "skip") {
+    if (!lazyTask) return;
+    if (action === "skip") {
+      await updateTask(lazyTask.id, { status: "archived" });
+    }
+    if (action === "reschedule") {
+      if (lazyTask.due_at) {
+        const next = parseISO(lazyTask.due_at);
+        next.setDate(next.getDate() + 1);
+        await updateTask(lazyTask.id, { due_at: next.toISOString() });
+      } else if (lazyTask.window_start && lazyTask.window_end) {
+        const start = parseISO(lazyTask.window_start);
+        const end = parseISO(lazyTask.window_end);
+        start.setDate(start.getDate() + 1);
+        end.setDate(end.getDate() + 1);
+        await updateTask(lazyTask.id, {
+          window_start: start.toISOString(),
+          window_end: end.toISOString(),
+        });
+      }
+    }
+    if (action === "shrink") {
+      if (lazyTask.window_start) {
+        const start = parseISO(lazyTask.window_start);
+        const end = new Date(start.getTime() + 30 * 60000);
+        await updateTask(lazyTask.id, {
+          window_end: end.toISOString(),
+        });
+      } else if (lazyTask.due_at) {
+        const due = parseISO(lazyTask.due_at);
+        const start = new Date(due.getTime() - 30 * 60000);
+        const end = new Date(due.getTime() + 30 * 60000);
+        await updateTask(lazyTask.id, {
+          window_start: start.toISOString(),
+          window_end: end.toISOString(),
+          due_at: null,
+        });
+      }
+    }
+    setLazyTask(null);
+    refreshTasks();
+    refreshNow();
+  }
+
+  async function handleAddHabit(task: Task) {
+    await updateTask(task.id, { recurrence: "daily", recurrence_detail: "habit" });
+    refreshTasks();
+  }
+
+  async function handleCancelTask(task: Task) {
+    await updateTask(task.id, { status: "archived" });
+    refreshTasks();
   }
 
   async function handleSave() {
@@ -165,6 +333,42 @@ export default function App() {
     refreshSettings();
   }
 
+  const policyPresets = [
+    {
+      key: "calm",
+      label: "Calm nudges",
+      values: {
+        policy_mode: "adaptive",
+        daily_budget: 6,
+        quiet_hours_start: "23:30",
+        quiet_hours_end: "07:00",
+        lead_time_minutes: 20,
+      },
+    },
+    {
+      key: "minimal",
+      label: "Minimal",
+      values: {
+        policy_mode: "adaptive",
+        daily_budget: 3,
+        quiet_hours_start: "22:30",
+        quiet_hours_end: "08:00",
+        lead_time_minutes: 15,
+      },
+    },
+    {
+      key: "strict",
+      label: "Strict",
+      values: {
+        policy_mode: "adaptive",
+        daily_budget: 10,
+        quiet_hours_start: "00:00",
+        quiet_hours_end: "06:30",
+        lead_time_minutes: 25,
+      },
+    },
+  ] as const;
+
   return (
     <div className="min-h-screen">
       <header className="bg-white shadow-sm">
@@ -195,6 +399,12 @@ export default function App() {
         {page === "Now" && (
           <section className="grid gap-6 lg:grid-cols-[2fr,1fr]">
             <div className="space-y-6">
+              <button
+                className="w-full rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-white"
+                onClick={() => setQuickAddOpen(true)}
+              >
+                Quick add
+              </button>
               <div className="rounded-3xl bg-white p-6 shadow">
                 <h2 className="text-lg font-semibold">Next best action</h2>
                 {now?.next_best_action ? (
@@ -203,7 +413,9 @@ export default function App() {
                       <p className="text-sm uppercase text-slate">Priority {now.next_best_action.priority}</p>
                       <h3 className="text-xl font-semibold">{now.next_best_action.title}</h3>
                       <p className="text-sm text-slate">
-                        Scheduled {now.next_best_action.scheduled_for ?? "flexible"}
+                        {now.next_best_action.scheduled_for
+                          ? formatReminderTime(now.next_best_action.scheduled_for)
+                          : "Flexible window"}
                       </p>
                       <p className="mt-2 text-sm text-slate">{now.next_best_action.why_now}</p>
                     </div>
@@ -249,7 +461,9 @@ export default function App() {
                         className="rounded-2xl border border-slate/10 bg-mist p-4"
                       >
                         <p className="text-sm text-slate">Reminder #{item.id}</p>
-                        <p className="font-medium">Scheduled {item.scheduled_for}</p>
+                        <p className="font-medium">
+                          {formatReminderTime(item.scheduled_for)}
+                        </p>
                       </li>
                     ))
                   ) : (
@@ -273,7 +487,9 @@ export default function App() {
                     now.later_today.map((item) => (
                       <div key={item.id} className="rounded-2xl border border-slate/10 p-4">
                         <p className="text-sm text-slate">Reminder #{item.id}</p>
-                        <p className="font-medium">Scheduled {item.scheduled_for}</p>
+                        <p className="font-medium">
+                          {formatReminderTime(item.scheduled_for)}
+                        </p>
                       </div>
                     ))
                   ) : (
@@ -290,6 +506,12 @@ export default function App() {
             <div className="rounded-3xl bg-white p-6 shadow">
               <h2 className="text-lg font-semibold">Type your plan</h2>
               <p className="text-sm text-slate">Use natural language. The parser will structure it.</p>
+              <button
+                className="mt-4 w-full rounded-2xl border border-slate/20 px-4 py-3 text-sm font-semibold"
+                onClick={() => setQuickAddOpen(true)}
+              >
+                Quick add
+              </button>
               <textarea
                 className="mt-4 h-40 w-full rounded-2xl border border-slate/20 p-4 text-sm"
                 placeholder="Tomorrow 9:00 dentist. Every day 20:00 journal."
@@ -354,21 +576,39 @@ export default function App() {
                       <div className="mt-3 grid gap-3 md:grid-cols-2">
                         <input
                           className="rounded-lg border border-slate/20 p-2 text-sm"
-                          placeholder="Window start"
-                          value={item.window_start ?? ""}
+                          type="datetime-local"
+                          value={
+                            item.window_start
+                              ? format(parseISO(item.window_start), "yyyy-MM-dd'T'HH:mm")
+                              : ""
+                          }
                           onChange={(event) => {
                             const updated = [...parsedItems];
-                            updated[index] = { ...item, window_start: event.target.value };
+                            updated[index] = {
+                              ...item,
+                              window_start: event.target.value
+                                ? new Date(event.target.value).toISOString()
+                                : null,
+                            };
                             setParsedItems(updated);
                           }}
                         />
                         <input
                           className="rounded-lg border border-slate/20 p-2 text-sm"
-                          placeholder="Window end"
-                          value={item.window_end ?? ""}
+                          type="datetime-local"
+                          value={
+                            item.window_end
+                              ? format(parseISO(item.window_end), "yyyy-MM-dd'T'HH:mm")
+                              : ""
+                          }
                           onChange={(event) => {
                             const updated = [...parsedItems];
-                            updated[index] = { ...item, window_end: event.target.value };
+                            updated[index] = {
+                              ...item,
+                              window_end: event.target.value
+                                ? new Date(event.target.value).toISOString()
+                                : null,
+                            };
                             setParsedItems(updated);
                           }}
                         />
@@ -423,27 +663,12 @@ export default function App() {
           <section className="rounded-3xl bg-white p-6 shadow">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <h2 className="text-lg font-semibold">Tasks</h2>
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    { label: "Today", value: "today" },
-                    { label: "Next 7", value: "next7" },
-                    { label: "All", value: "all" },
-                  ] as const
-                ).map((filter) => (
-                  <button
-                    key={filter.value}
-                    className={`rounded-full px-4 py-2 text-sm ${
-                      taskFilter === filter.value
-                        ? "bg-ink text-white"
-                        : "border border-slate/20"
-                    }`}
-                    onClick={() => setTaskFilter(filter.value)}
-                  >
-                    {filter.label}
-                  </button>
-                ))}
-              </div>
+              <button
+                className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                onClick={() => setQuickAddOpen(true)}
+              >
+                Quick add
+              </button>
             </div>
             <input
               className="mt-4 w-full rounded-2xl border border-slate/20 p-3 text-sm"
@@ -451,100 +676,194 @@ export default function App() {
               value={taskSearch}
               onChange={(event) => setTaskSearch(event.target.value)}
             />
-            <div className="mt-4 space-y-3">
-              {filteredTasks.length ? (
-                filteredTasks.map((task) => (
-                  <div
-                    key={task.id}
-                    className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate/10 p-4"
-                  >
-                    <div>
-                      <p className="text-sm text-slate">{task.dueDate ?? "Flexible"}</p>
-                      <h3 className="text-base font-semibold">{task.title}</h3>
-                      <p className="text-sm text-slate">Priority {task.priority}</p>
-                    </div>
-                    <button
-                      className={`rounded-full px-4 py-2 text-sm ${
-                        task.status === "completed"
-                          ? "bg-emerald-500 text-white"
-                          : "border border-slate/20"
-                      }`}
-                      onClick={() => handleStatusToggle(task)}
-                    >
-                      {task.status === "completed" ? "Completed" : "Mark done"}
-                    </button>
+            {(
+              [
+                { key: "today", label: "Today", items: groupedTasks.today },
+                { key: "tomorrow", label: "Tomorrow", items: groupedTasks.tomorrow },
+                { key: "later", label: "Later", items: groupedTasks.later },
+                { key: "completed", label: "Completed", items: groupedTasks.completed },
+              ] as const
+            ).map((group) => (
+              <div key={group.key} className="mt-6">
+                <button
+                  className="flex w-full items-center justify-between rounded-2xl border border-slate/10 px-4 py-3"
+                  onClick={() =>
+                    setTasksOpen((prev) => ({ ...prev, [group.key]: !prev[group.key] }))
+                  }
+                >
+                  <span className="text-sm font-semibold">{group.label}</span>
+                  <span className="text-xs text-slate">
+                    {tasksOpen[group.key as keyof typeof tasksOpen] ? "Hide" : "Show"}
+                  </span>
+                </button>
+                {tasksOpen[group.key as keyof typeof tasksOpen] && (
+                  <div className="mt-3 space-y-3">
+                    {group.items.length ? (
+                      group.items.map((task) => (
+                        <div
+                          key={task.id}
+                          className="rounded-2xl border border-slate/10 p-4"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-4">
+                            <div>
+                              <p className="text-sm text-slate">{formatTaskTime(task)}</p>
+                              <h3 className="text-base font-semibold">{task.title}</h3>
+                              <p className="text-sm text-slate">Priority {task.priority}</p>
+                            </div>
+                            <button
+                              className={`rounded-full px-4 py-2 text-sm ${
+                                task.status === "completed"
+                                  ? "bg-emerald-500 text-white"
+                                  : "border border-slate/20"
+                              }`}
+                              onClick={() => handleStatusToggle(task)}
+                            >
+                              {task.status === "completed" ? "Completed" : "Mark done"}
+                            </button>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                              onClick={() => handleAddHabit(task)}
+                            >
+                              Add to habit
+                            </button>
+                            <button
+                              className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                              onClick={() => handleCancelTask(task)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                              onClick={() => setLazyTask(task)}
+                            >
+                              Lazy
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-slate">Nothing here yet.</p>
+                    )}
                   </div>
-                ))
-              ) : (
-                <p className="text-sm text-slate">No tasks yet.</p>
-              )}
-            </div>
+                )}
+              </div>
+            ))}
           </section>
         )}
 
         {page === "Policy" && settings && (
           <section className="rounded-3xl bg-white p-6 shadow">
             <h2 className="text-lg font-semibold">Policy settings</h2>
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              <label className="space-y-2 text-sm">
-                <span className="text-slate">Mode</span>
-                <select
-                  className="w-full rounded-xl border border-slate/20 p-3"
-                  value={settings.policy_mode}
-                  onChange={(event) => handleSettingsChange("policy_mode", event.target.value)}
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              {policyPresets.map((preset) => (
+                <button
+                  key={preset.key}
+                  className="rounded-2xl border border-slate/20 p-4 text-left"
+                  onClick={() => updateSettings(preset.values).then(refreshSettings)}
                 >
-                  <option value="baseline">Baseline</option>
-                  <option value="adaptive">Adaptive</option>
-                </select>
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-slate">Daily notification budget</span>
-                <input
-                  className="w-full rounded-xl border border-slate/20 p-3"
-                  type="number"
-                  min={1}
-                  value={settings.daily_budget}
-                  onChange={(event) =>
-                    handleSettingsChange("daily_budget", Number(event.target.value))
-                  }
-                />
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-slate">Quiet hours start</span>
-                <input
-                  className="w-full rounded-xl border border-slate/20 p-3"
-                  type="time"
-                  value={settings.quiet_hours_start ?? ""}
-                  onChange={(event) => handleSettingsChange("quiet_hours_start", event.target.value)}
-                />
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-slate">Quiet hours end</span>
-                <input
-                  className="w-full rounded-xl border border-slate/20 p-3"
-                  type="time"
-                  value={settings.quiet_hours_end ?? ""}
-                  onChange={(event) => handleSettingsChange("quiet_hours_end", event.target.value)}
-                />
-              </label>
-              <label className="space-y-2 text-sm">
-                <span className="text-slate">Lead time (minutes)</span>
-                <input
-                  className="w-full rounded-xl border border-slate/20 p-3"
-                  type="number"
-                  min={5}
-                  value={settings.lead_time_minutes}
-                  onChange={(event) =>
-                    handleSettingsChange("lead_time_minutes", Number(event.target.value))
-                  }
-                />
-              </label>
+                  <p className="text-sm font-semibold">{preset.label}</p>
+                  <p className="text-xs text-slate">
+                    Budget {preset.values.daily_budget} • Quiet{" "}
+                    {preset.values.quiet_hours_start}–{preset.values.quiet_hours_end}
+                  </p>
+                </button>
+              ))}
             </div>
+            <details className="mt-6 rounded-2xl border border-slate/10 p-4">
+              <summary className="cursor-pointer text-sm font-semibold text-slate">
+                Advanced settings
+              </summary>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <label className="space-y-2 text-sm">
+                  <span className="text-slate">Daily notification budget</span>
+                  <input
+                    className="w-full rounded-xl border border-slate/20 p-3"
+                    type="number"
+                    min={1}
+                    value={settings.daily_budget}
+                    onChange={(event) =>
+                      handleSettingsChange("daily_budget", Number(event.target.value))
+                    }
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="text-slate">Quiet hours start</span>
+                  <input
+                    className="w-full rounded-xl border border-slate/20 p-3"
+                    type="time"
+                    value={settings.quiet_hours_start ?? ""}
+                    onChange={(event) =>
+                      handleSettingsChange("quiet_hours_start", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="text-slate">Quiet hours end</span>
+                  <input
+                    className="w-full rounded-xl border border-slate/20 p-3"
+                    type="time"
+                    value={settings.quiet_hours_end ?? ""}
+                    onChange={(event) =>
+                      handleSettingsChange("quiet_hours_end", event.target.value)
+                    }
+                  />
+                </label>
+                <label className="space-y-2 text-sm">
+                  <span className="text-slate">Lead time (minutes)</span>
+                  <input
+                    className="w-full rounded-xl border border-slate/20 p-3"
+                    type="number"
+                    min={5}
+                    value={settings.lead_time_minutes}
+                    onChange={(event) =>
+                      handleSettingsChange("lead_time_minutes", Number(event.target.value))
+                    }
+                  />
+                </label>
+              </div>
+            </details>
           </section>
         )}
 
         {page === "Insights" && insights && (
           <section className="grid gap-6 lg:grid-cols-2">
+            {summary && (
+              <div className="rounded-3xl bg-white p-6 shadow lg:col-span-2">
+                <h2 className="text-lg font-semibold">Weekly Summary</h2>
+                <div className="mt-3 grid gap-3 md:grid-cols-4">
+                  <div className="rounded-2xl border border-slate/10 p-4">
+                    <p className="text-xs uppercase text-slate">Completion rate</p>
+                    <p className="text-lg font-semibold">
+                      {Math.round(summary.metrics.completion_rate * 100)}%
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate/10 p-4">
+                    <p className="text-xs uppercase text-slate">Notifications/day</p>
+                    <p className="text-lg font-semibold">
+                      {summary.metrics.notifications_per_day}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate/10 p-4">
+                    <p className="text-xs uppercase text-slate">Notifs per completion</p>
+                    <p className="text-lg font-semibold">
+                      {summary.metrics.notifications_per_completion}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate/10 p-4">
+                    <p className="text-xs uppercase text-slate">Missed proxy</p>
+                    <p className="text-lg font-semibold">{summary.metrics.missed_rate_proxy}</p>
+                  </div>
+                </div>
+                <p className="mt-4 text-sm text-slate">{summary.narrative}</p>
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate">
+                  {summary.recommendations.map((rec, index) => (
+                    <li key={index}>{rec}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="rounded-3xl bg-white p-6 shadow">
               <h2 className="text-lg font-semibold">Notifications per day</h2>
               <div className="mt-4 h-64">
@@ -604,6 +923,97 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {quickAddOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate/40 px-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Quick add</h3>
+              <button
+                className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                onClick={() => setQuickAddOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-slate">
+              Dictate or type a plan. We will parse it into tasks for review.
+            </p>
+            <textarea
+              className="mt-4 h-32 w-full rounded-2xl border border-slate/20 p-3 text-sm"
+              placeholder="Say: Tomorrow 9:00 dentist, 18:00 meal prep."
+              value={quickAddText}
+              onChange={(event) => setQuickAddText(event.target.value)}
+            />
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                onClick={handleQuickAddParse}
+                disabled={!quickAddText || isParsing}
+              >
+                {isParsing ? "Parsing..." : "Parse"}
+              </button>
+              <button
+                className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                onClick={startDictation}
+                disabled={!speechSupported || isDictating}
+              >
+                {speechSupported ? (isDictating ? "Listening..." : "Start dictation") : "Dictation unavailable"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {lazyTask && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate/40 px-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Decision support</h3>
+              <button
+                className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                onClick={() => setLazyTask(null)}
+              >
+                Close
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-slate">{lazyTask.title}</p>
+            <p className="text-xs text-slate">{formatTaskTime(lazyTask)}</p>
+            <div className="mt-4 space-y-2">
+              {lazySuggestion.map((suggestion, index) => (
+                <div key={index} className="rounded-2xl border border-slate/10 p-3 text-sm">
+                  {suggestion}
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                onClick={() => handleLazyAction("reschedule")}
+              >
+                Reschedule
+              </button>
+              <button
+                className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                onClick={() => handleLazyAction("shrink")}
+              >
+                Shrink
+              </button>
+              <button
+                className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                onClick={() => handleLazyAction("skip")}
+              >
+                Skip
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-slate">
+              {useLlm
+                ? "Suggestions are tuned with LLM-aware nudges."
+                : "Suggestions are based on deterministic rules."}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

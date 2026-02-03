@@ -88,6 +88,21 @@ USE_LLM=true
 
 - The LLM is used only for plan parsing and short “why now” explanations. If the model returns invalid JSON, the backend falls back to the deterministic parser.
 - Notifications use the browser Notifications API and only fire while the app is open (no background push support).
+- Voice dictation relies on the browser Web Speech API and is best supported in Chromium-based browsers; it may be unavailable in Firefox or privacy-hardened environments.
+
+## Parsing format (spaced schedules)
+
+You can paste time blocks on their own lines, followed by the description on the next line(s):
+
+```
+06:30 - 07:30
+Morning review + stretch
+
+18:00 - 19:00
+Project work block
+```
+
+The parser treats each time range as a flexible window and attaches the following non-empty lines until the next time range.
 
 ## Development seed
 

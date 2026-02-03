@@ -64,3 +64,14 @@ export type InsightsResponse = {
   missed_rate_proxy: { date: string; value: number }[];
   notifications_per_completion: { date: string; value: number }[];
 };
+
+export type InsightsSummary = {
+  narrative: string;
+  recommendations: string[];
+  metrics: {
+    completion_rate: number;
+    notifications_per_day: number;
+    notifications_per_completion: number;
+    missed_rate_proxy: number;
+  };
+};

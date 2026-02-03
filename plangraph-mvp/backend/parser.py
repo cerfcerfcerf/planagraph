@@ -32,6 +32,17 @@ def _extract_time(text: str) -> time | None:
     return time(hour=hour, minute=minute)
 
 
+def _extract_time_range(text: str) -> tuple[time, time] | None:
+    match = re.search(r"\b(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\b", text)
+    if not match:
+        return None
+    start = _extract_time(match.group(1))
+    end = _extract_time(match.group(2))
+    if not start or not end:
+        return None
+    return start, end
+
+
 def _extract_date(text: str, today: date) -> date | None:
     lowered = text.lower()
     if "today" in lowered:
@@ -45,6 +56,28 @@ def _extract_date(text: str, today: date) -> date | None:
     if match:
         return date.fromisoformat(match.group(0))
     return None
+
+
+def priority_from_text(text: str) -> str:
+    lowered = text.lower()
+    high_keywords = [
+        "exam",
+        "test",
+        "submit",
+        "due",
+        "meeting",
+        "flight",
+        "doctor",
+        "medication",
+        "visa",
+        "deadline",
+    ]
+    low_keywords = ["optional", "maybe", "if time", "chill"]
+    if any(keyword in lowered for keyword in high_keywords):
+        return "high"
+    if any(keyword in lowered for keyword in low_keywords):
+        return "low"
+    return "med"
 
 
 def _extract_recurrence(text: str) -> tuple[str, str | None]:
@@ -73,43 +106,100 @@ def _default_window(base_date: date) -> tuple[datetime, datetime]:
 
 def deterministic_parse(text: str) -> list[ParseItem]:
     today = date.today()
-    parts = [
-        part.strip()
-        for part in re.split(r"[\n\.;]+", text)
-        if part.strip()
-    ]
+    lines = [line.strip() for line in text.splitlines()]
     items: list[ParseItem] = []
-    for part in parts:
-        detected_date = _extract_date(part, today) or today
-        detected_time = _extract_time(part)
-        recurrence, recurrence_detail = _extract_recurrence(part)
-        if detected_time:
-            due_time = detected_time.strftime("%H:%M")
-            item = ParseItem(
-                title=part,
-                date=detected_date.isoformat(),
-                due_time=due_time,
-                window_start=None,
-                window_end=None,
-                priority="med",
-                recurrence=recurrence,
-                recurrence_detail=recurrence_detail,
-                confidence=0.5,
-                notes=None,
+
+    current_range: tuple[time, time] | None = None
+    buffer: list[str] = []
+
+    def flush_buffer() -> None:
+        nonlocal buffer, current_range
+        if not buffer:
+            return
+        description = " ".join(buffer).strip()
+        title = buffer[0]
+        notes = " ".join(buffer[1:]).strip() if len(buffer) > 1 else None
+        detected_date = _extract_date(description, today) or today
+        recurrence, recurrence_detail = _extract_recurrence(description)
+        priority = priority_from_text(description)
+        if current_range:
+            start, end = current_range
+            window_start = datetime.combine(detected_date, start).isoformat()
+            window_end = datetime.combine(detected_date, end).isoformat()
+            items.append(
+                ParseItem(
+                    title=title,
+                    date=detected_date.isoformat(),
+                    due_time=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                    priority=priority,
+                    recurrence=recurrence,
+                    recurrence_detail=recurrence_detail,
+                    confidence=0.55,
+                    notes=notes,
+                )
             )
         else:
-            window_start, window_end = _default_window(detected_date)
-            item = ParseItem(
-                title=part,
-                date=detected_date.isoformat(),
-                due_time=None,
-                window_start=window_start.isoformat(),
-                window_end=window_end.isoformat(),
-                priority="med",
-                recurrence=recurrence,
-                recurrence_detail=recurrence_detail,
-                confidence=0.45,
-                notes=None,
-            )
-        items.append(item)
+            detected_time = _extract_time(description)
+            if detected_time:
+                due_time = detected_time.strftime("%H:%M")
+                items.append(
+                    ParseItem(
+                        title=title,
+                        date=detected_date.isoformat(),
+                        due_time=due_time,
+                        window_start=None,
+                        window_end=None,
+                        priority=priority,
+                        recurrence=recurrence,
+                        recurrence_detail=recurrence_detail,
+                        confidence=0.5,
+                        notes=notes,
+                    )
+                )
+            else:
+                window_start, window_end = _default_window(detected_date)
+                items.append(
+                    ParseItem(
+                        title=title,
+                        date=detected_date.isoformat(),
+                        due_time=None,
+                        window_start=window_start.isoformat(),
+                        window_end=window_end.isoformat(),
+                        priority=priority,
+                        recurrence=recurrence,
+                        recurrence_detail=recurrence_detail,
+                        confidence=0.45,
+                        notes=notes,
+                    )
+                )
+        buffer = []
+        current_range = None
+
+    for line in lines:
+        if not line:
+            continue
+        range_only = _extract_time_range(line)
+        if range_only and re.fullmatch(r"\s*\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}\s*", line):
+            flush_buffer()
+            current_range = range_only
+            continue
+        if current_range:
+            buffer.append(line)
+            continue
+        if range_only:
+            current_range = range_only
+            remainder = re.sub(r"\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}", "", line).strip()
+            if remainder:
+                buffer.append(remainder)
+                flush_buffer()
+            continue
+        for chunk in re.split(r"[.;]+", line):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            buffer.append(chunk)
+            flush_buffer()
+    flush_buffer()
     return items
