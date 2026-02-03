@@ -1,725 +1,596 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import ParsedItems from "./components/ParsedItems";
-import type { PlannedItem, Reminder, ScheduleItem } from "./types";
-import "./App.css";
+import type { Insights, NowResponse, ParsedItem, Settings, Task } from "./types";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
-const DAY_START = "07:00";
-const DAY_END = "21:00";
+const tabs = ["Now", "Add", "Tasks", "Policy", "Insights"] as const;
 
-const initialText =
-  "Tomorrow school at 8. Take pills at 7:30. After school buy snacks. Don't forget headphones.";
+type Tab = (typeof tabs)[number];
 
-const formatDate = (value: Date) => value.toISOString().slice(0, 10);
-
-const addDays = (value: string, days: number) => {
-  const [year, month, day] = value.split("-").map(Number);
-  const base = new Date(year, month - 1, day);
-  base.setDate(base.getDate() + days);
-  return formatDate(base);
+const formatDateTime = (value?: string | null) => {
+  if (!value) return "Flexible";
+  return new Date(value).toLocaleString();
 };
 
-const toMinutes = (timeValue: string) => {
-  const [hours, minutes] = timeValue.split(":").map(Number);
-  return hours * 60 + minutes;
+const formatDate = (value?: string | null) => {
+  if (!value) return "";
+  return new Date(value).toLocaleDateString();
 };
 
-const addMinutes = (timeValue: string, minutesToAdd: number) => {
-  const total = toMinutes(timeValue) + minutesToAdd;
-  const hours = Math.floor((total + 1440) % 1440 / 60);
-  const minutes = (total + 1440) % 60;
-  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+const formatTime = (value?: string | null) => {
+  if (!value) return "";
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 };
-
-const tabs = [
-  { id: "now", label: "Now" },
-  { id: "tasks", label: "Tasks" },
-  { id: "add", label: "Add" },
-] as const;
-
-type ContextTarget =
-  | { kind: "task"; item: ScheduleItem }
-  | { kind: "planned"; item: PlannedItem }
-  | { kind: "reminder"; reminder: Reminder };
 
 export default function App() {
-  const today = useMemo(() => formatDate(new Date()), []);
-  const [text, setText] = useState(initialText);
-  const [todayInput, setTodayInput] = useState(today);
-  const [items, setItems] = useState<ScheduleItem[]>([]);
-  const [plannedItems, setPlannedItems] = useState<PlannedItem[]>([]);
-  const [conflicts, setConflicts] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]["id"]>("now");
-  const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [notificationStatus, setNotificationStatus] = useState(
-    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
-  );
-  const notifiedIds = useRef<Set<number>>(new Set());
+  const [activeTab, setActiveTab] = useState<Tab>("Now");
+  const [nowState, setNowState] = useState<NowResponse | null>(null);
+  const [planText, setPlanText] = useState("");
+  const [parseItems, setParseItems] = useState<ParsedItem[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [insights, setInsights] = useState<Insights | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("today");
+  const [notificationId, setNotificationId] = useState<number | null>(null);
 
-  const [taskFilterRange, setTaskFilterRange] = useState<"today" | "week" | "all">("today");
-  const [taskFilterType, setTaskFilterType] = useState("all");
-  const [taskFilterStatus, setTaskFilterStatus] = useState("pending");
-  const [taskSearch, setTaskSearch] = useState("");
-  const [tasks, setTasks] = useState<ScheduleItem[]>([]);
+  const refreshNow = () => api.now().then(setNowState);
 
-  const [quickAdd, setQuickAdd] = useState({
-    title: "",
-    date: today,
-    time: "",
-    type: "task",
-    priority: 1,
-  });
-  const [pasteText, setPasteText] = useState("");
-  const [pastePreview, setPastePreview] = useState<ScheduleItem[]>([]);
+  useEffect(() => {
+    refreshNow();
+    api.tasks().then(setTasks);
+    api.settings().then(setSettings);
+    api.insights().then(setInsights);
+  }, []);
 
-  const [contextMenu, setContextMenu] = useState<{
-    target: ContextTarget;
-    x: number;
-    y: number;
-  } | null>(null);
-  const [modal, setModal] = useState<{
-    mode: "edit" | "reschedule";
-    item: ScheduleItem;
-  } | null>(null);
-  const [laterTodayOpen, setLaterTodayOpen] = useState(false);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      refreshNow();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
-  const parseItems = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api.parse(text, todayInput);
-      setItems(data.items);
-      setPlannedItems([]);
-      setConflicts([]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const planDay = async (overrideItems?: ScheduleItem[]) => {
-    setLoading(true);
-    setError(null);
-    const includesTomorrow = text.toLowerCase().includes("tomorrow");
-    const day = includesTomorrow ? addDays(todayInput, 1) : todayInput;
-
-    try {
-      const data = await api.plan(day, DAY_START, DAY_END, overrideItems ?? items);
-      setPlannedItems(data.planned);
-      setConflicts(data.conflicts);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const refreshReminders = async () => {
-    try {
-      const data = await api.remindersDue();
-      setReminders(data.reminders);
-      if (notificationStatus === "granted") {
-        data.reminders.forEach((reminder) => {
-          if (notifiedIds.current.has(reminder.id)) {
-            return;
-          }
-          notifiedIds.current.add(reminder.id);
-          new Notification(reminder.title, {
-            body: reminder.body ?? "Reminder is due.",
-          });
+  useEffect(() => {
+    if (!nowState?.next_best_action) return;
+    const reminder = nowState.next_best_action;
+    const scheduled = new Date(reminder.scheduled_for);
+    if (scheduled <= new Date() && reminder.id !== notificationId) {
+      if (Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+      if (Notification.permission === "granted") {
+        new Notification("Plangraph", {
+          body: reminder.title,
         });
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setNotificationId(reminder.id);
     }
-  };
+  }, [nowState, notificationId]);
 
-  const handleEnableNotifications = () => {
-    if (typeof Notification === "undefined") {
-      setNotificationStatus("unsupported");
-      return;
-    }
-    Notification.requestPermission().then((permission) => setNotificationStatus(permission));
-  };
-
-  const handleReminderAction = async (id: number, action: "dismiss" | "snooze" | "done", snoozeMin?: number) => {
-    await api.ackReminder(id, action, snoozeMin);
-    await refreshReminders();
-  };
-
-  const loadTasks = async () => {
-    const range = taskFilterRange;
-    let from: string | undefined;
-    let to: string | undefined;
-    if (range === "today") {
-      from = today;
-      to = today;
-    } else if (range === "week") {
-      from = today;
-      to = addDays(today, 7);
-    }
-    const typeFilter = taskFilterType === "all" ? undefined : taskFilterType;
-    const statusFilter = taskFilterStatus === "all" ? undefined : taskFilterStatus;
-    const data = await api.tasks({
-      from,
-      to,
-      type: typeFilter,
-      status: statusFilter,
-      q: taskSearch || undefined,
+  const filteredTasks = useMemo(() => {
+    const today = new Date();
+    return tasks.filter((task) => {
+      if (search && !task.title.toLowerCase().includes(search.toLowerCase())) {
+        return false;
+      }
+      if (filter === "today" && task.due_at) {
+        return new Date(task.due_at).toDateString() === today.toDateString();
+      }
+      if (filter === "next7" && task.due_at) {
+        const due = new Date(task.due_at);
+        const diff = (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
+        return diff >= 0 && diff <= 7;
+      }
+      if (filter === "today" && !task.due_at) {
+        return false;
+      }
+      return true;
     });
-    setTasks(data.items);
+  }, [tasks, search, filter]);
+
+  const handleParse = async () => {
+    const response = await api.parse(planText);
+    setParseItems(response.items);
   };
 
-  const handleQuickAdd = async () => {
-    if (!quickAdd.title.trim()) {
-      return;
-    }
-    await api.createTask({
-      title: quickAdd.title,
-      type: quickAdd.type as "task" | "event" | "reminder",
-      date: quickAdd.date,
-      start_time: quickAdd.time || null,
-      duration_min: 0,
-      priority: quickAdd.priority,
+  const handleSaveParsed = async () => {
+    await Promise.all(
+      parseItems.map((item) =>
+        api.createTask({
+          title: item.title,
+          notes: item.notes,
+          date: item.date,
+          due_time: item.due_time,
+          window_start: item.window_start,
+          window_end: item.window_end,
+          priority: item.priority,
+          recurrence: item.recurrence,
+          recurrence_detail: item.recurrence_detail,
+        })
+      )
+    );
+    setPlanText("");
+    setParseItems([]);
+    const updated = await api.tasks();
+    setTasks(updated);
+    setActiveTab("Tasks");
+  };
+
+  const handleTaskToggle = async (task: Task) => {
+    const updated = await api.updateTask(task.id, {
+      status: task.status === "completed" ? "active" : "completed",
     });
-    setQuickAdd({ title: "", date: today, time: "", type: "task", priority: 1 });
-    await loadTasks();
+    setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
   };
 
-  const handlePasteParse = async () => {
-    const data = await api.parse(pasteText, todayInput);
-    setPastePreview(data.items);
+  const handleReminderAction = async (id: number, action: "done" | "snooze_10" | "snooze_30" | "dismiss") => {
+    await api.reminderAction(id, action);
+    refreshNow();
+    const updated = await api.tasks();
+    setTasks(updated);
   };
 
-  const handlePasteSave = async () => {
-    if (!pasteText.trim()) {
-      return;
-    }
-    await api.createEntry(pasteText, todayInput);
-    setPasteText("");
-    setPastePreview([]);
-    await loadTasks();
+  const handleSettingsSave = async () => {
+    if (!settings) return;
+    const updated = await api.updateSettings(settings);
+    setSettings(updated);
   };
-
-  const handlePastePlan = async () => {
-    if (pastePreview.length === 0) {
-      return;
-    }
-    setItems(pastePreview);
-    setText(pasteText);
-    await planDay(pastePreview);
-    setActiveTab("now");
-  };
-
-  const handleContextMenu = (event: React.MouseEvent, target: ContextTarget) => {
-    event.preventDefault();
-    setContextMenu({ target, x: event.clientX, y: event.clientY });
-  };
-
-  const handleMenuClose = () => setContextMenu(null);
-
-  const handleMenuAction = async (action: string) => {
-    if (!contextMenu) return;
-    const { target } = contextMenu;
-    if (target.kind === "reminder") {
-      if (action === "done") await handleReminderAction(target.reminder.id, "done");
-      if (action === "dismiss") await handleReminderAction(target.reminder.id, "dismiss");
-      if (action === "snooze-10") await handleReminderAction(target.reminder.id, "snooze", 10);
-      if (action === "snooze-30") await handleReminderAction(target.reminder.id, "snooze", 30);
-      if (action === "snooze-60") await handleReminderAction(target.reminder.id, "snooze", 60);
-    } else {
-      const item = target.item;
-      if (!item.id) {
-        handleMenuClose();
-        return;
-      }
-      if (action === "done") await api.completeTask(item.id);
-      if (action === "delete") await api.deleteTask(item.id);
-      if (action === "snooze-10" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 10) });
-      }
-      if (action === "snooze-30" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 30) });
-      }
-      if (action === "snooze-60" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 60) });
-      }
-      if (action === "edit") setModal({ mode: "edit", item });
-      if (action === "reschedule") setModal({ mode: "reschedule", item });
-      await loadTasks();
-    }
-    handleMenuClose();
-  };
-
-  useEffect(() => {
-    refreshReminders().catch(() => undefined);
-    const interval = window.setInterval(() => {
-      refreshReminders().catch(() => undefined);
-    }, 15000);
-    return () => window.clearInterval(interval);
-  }, [notificationStatus]);
-
-  useEffect(() => {
-    loadTasks().catch(() => undefined);
-  }, [taskFilterRange, taskFilterType, taskFilterStatus, taskSearch, activeTab]);
-
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handleClick = () => setContextMenu(null);
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(null);
-    };
-    window.addEventListener("click", handleClick);
-    window.addEventListener("keydown", handleKey);
-    return () => {
-      window.removeEventListener("click", handleClick);
-      window.removeEventListener("keydown", handleKey);
-    };
-  }, [contextMenu]);
-
-  const nowMinutes = toMinutes(
-    `${new Date().getHours().toString().padStart(2, "0")}:${new Date().getMinutes().toString().padStart(2, "0")}`
-  );
-  const upcoming = plannedItems.filter(
-    (item) =>
-      item.planned_start &&
-      toMinutes(item.planned_start) >= nowMinutes &&
-      toMinutes(item.planned_start) < nowMinutes + 360
-  );
-  const laterToday = plannedItems.filter(
-    (item) => item.planned_start && toMinutes(item.planned_start) >= nowMinutes + 360
-  );
-
-  const groupedTasks = tasks.reduce<Record<string, ScheduleItem[]>>((acc, task) => {
-    const key = task.date || "No date";
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(task);
-    return acc;
-  }, {});
 
   return (
-    <div className="app">
-      <header className="hero">
-        <div>
-          <h1>Plangraph MVP</h1>
-          <p>Fast, local scheduling with reminders and smart task placement.</p>
-        </div>
-        <div className="hero-meta">
-          <span className="pill">Now / Tasks / Add</span>
-          <span className="pill">Local Ollama</span>
+    <div className="min-h-screen">
+      <header className="bg-white shadow-sm">
+        <div className="mx-auto max-w-6xl px-6 py-6 flex items-center justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Plangraph</p>
+            <h1 className="text-2xl font-semibold">Life OS</h1>
+          </div>
+          <nav className="flex gap-2">
+            {tabs.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-2 rounded-full text-sm ${
+                  activeTab === tab ? "bg-ink text-white" : "bg-slate-100 text-slate-600"
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
+          </nav>
         </div>
       </header>
 
-      <nav className="tabs">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            className={`tab ${activeTab === tab.id ? "active" : ""}`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
-
-      {activeTab === "now" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Due Now</h2>
-                <p className="muted">Reminders ready for action.</p>
-              </div>
-              <button className="ghost" onClick={handleEnableNotifications}>
-                Enable notifications ({notificationStatus})
-              </button>
-            </div>
-            {reminders.length === 0 ? (
-              <p className="muted">Nothing due yet.</p>
-            ) : (
-              <div className="reminder-grid">
-                {reminders.map((reminder) => (
-                  <div
-                    className="reminder-card"
-                    key={reminder.id}
-                    onContextMenu={(event) => handleContextMenu(event, { kind: "reminder", reminder })}
-                  >
-                    <div className="reminder-header">
-                      <div>
-                        <h3>{reminder.title}</h3>
-                        <p className="muted">Due {new Date(reminder.due_at).toLocaleString()}</p>
-                      </div>
-                      <span className="pill pill-secondary">{reminder.kind}</span>
-                    </div>
-                    <p>{reminder.body ?? "No details"}</p>
-                    <p className="muted">{reminder.reason ?? "No reason provided."}</p>
-                    <div className="actions">
-                      <button onClick={() => handleReminderAction(reminder.id, "done")}>Done</button>
-                      <button className="ghost" onClick={() => handleReminderAction(reminder.id, "snooze", 10)}>
-                        Snooze 10m
-                      </button>
-                      <button className="ghost" onClick={() => handleReminderAction(reminder.id, "dismiss")}>
-                        Dismiss
-                      </button>
-                    </div>
+      <main className="mx-auto max-w-6xl px-6 py-8">
+        {activeTab === "Now" && (
+          <section className="grid gap-6 lg:grid-cols-[2fr,1fr]">
+            <div className="bg-white rounded-2xl p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Next best action</h2>
+              {nowState?.next_best_action ? (
+                <div className="mt-4 space-y-4">
+                  <div>
+                    <p className="text-xl font-semibold">{nowState.next_best_action.title}</p>
+                    <p className="text-sm text-slate-500">
+                      {formatDateTime(nowState.next_best_action.scheduled_for)}
+                    </p>
+                    <p className="mt-2 text-sm italic text-slate-600">“{nowState.why_now}”</p>
                   </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Next 6 hours</h2>
-                <p className="muted">What is coming up based on the latest plan.</p>
-              </div>
-              <span className="pill">{upcoming.length} items</span>
-            </div>
-            {upcoming.length === 0 ? (
-              <p className="muted">No upcoming items yet. Plan your day to see them here.</p>
-            ) : (
-              <div className="timeline">
-                {upcoming.map((item, index) => (
-                  <div
-                    className="timeline-row"
-                    key={`${item.title}-${index}`}
-                    onContextMenu={(event) => handleContextMenu(event, { kind: "planned", item })}
-                  >
-                    <div className="timeline-time">
-                      {item.planned_start}–{item.planned_end}
-                    </div>
-                    <div className="timeline-dot" />
-                    <div className="timeline-card">
-                      <div className="timeline-header">
-                        <h3>{item.title}</h3>
-                        <span className="pill pill-secondary">{item.type}</span>
-                      </div>
-                      <p className="muted">{item.reason ?? "Scheduled item"}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Later Today</h2>
-                <p className="muted">Collapsed by default.</p>
-              </div>
-              <button className="ghost" onClick={() => setLaterTodayOpen((prev) => !prev)}>
-                {laterTodayOpen ? "Hide" : "Show"}
-              </button>
-            </div>
-            {laterTodayOpen && (
-              <div className="timeline">
-                {laterToday.length === 0 ? (
-                  <p className="muted">No later items.</p>
-                ) : (
-                  laterToday.map((item, index) => (
-                    <div
-                      className="timeline-row"
-                      key={`${item.title}-later-${index}`}
-                      onContextMenu={(event) => handleContextMenu(event, { kind: "planned", item })}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => handleReminderAction(nowState.next_best_action!.id, "done")}
+                      className="rounded-lg bg-emerald-500 px-4 py-2 text-white"
                     >
-                      <div className="timeline-time">
-                        {item.planned_start}–{item.planned_end}
-                      </div>
-                      <div className="timeline-dot" />
-                      <div className="timeline-card">
-                        <div className="timeline-header">
-                          <h3>{item.title}</h3>
-                          <span className="pill pill-secondary">{item.type}</span>
-                        </div>
-                        <p className="muted">{item.reason ?? "Scheduled item"}</p>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </section>
-        </section>
-      )}
-
-      {activeTab === "tasks" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>All Tasks</h2>
-                <p className="muted">Manage everything across days and types.</p>
-              </div>
-            </div>
-            <div className="form-grid">
-              <label className="field">
-                <span>Range</span>
-                <select value={taskFilterRange} onChange={(event) => setTaskFilterRange(event.target.value as "today" | "week" | "all")}>
-                  <option value="today">Today</option>
-                  <option value="week">This week</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Type</span>
-                <select value={taskFilterType} onChange={(event) => setTaskFilterType(event.target.value)}>
-                  <option value="all">All</option>
-                  <option value="task">Task</option>
-                  <option value="event">Event</option>
-                  <option value="reminder">Reminder</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Status</span>
-                <select value={taskFilterStatus} onChange={(event) => setTaskFilterStatus(event.target.value)}>
-                  <option value="pending">Pending</option>
-                  <option value="done">Done</option>
-                  <option value="dismissed">Dismissed</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Search</span>
-                <input value={taskSearch} onChange={(event) => setTaskSearch(event.target.value)} placeholder="Search tasks" />
-              </label>
-            </div>
-
-            {Object.keys(groupedTasks).length === 0 ? (
-              <p className="muted">No tasks match the filters.</p>
-            ) : (
-              Object.entries(groupedTasks).map(([dateKey, grouped]) => (
-                <div key={dateKey} className="group-block">
-                  <h3>{dateKey}</h3>
-                  <div className="table table-parsed">
-                    <div className="table-row table-header">
-                      <span>Title</span>
-                      <span>Date</span>
-                      <span>Time</span>
-                      <span>Status</span>
-                      <span>Priority</span>
-                      <span>Type</span>
-                      <span>Notes</span>
-                      <span>ID</span>
-                    </div>
-                    {grouped.map((task) => (
-                      <div
-                        className="table-row"
-                        key={task.id}
-                        onContextMenu={(event) => handleContextMenu(event, { kind: "task", item: task })}
-                      >
-                        <span>{task.title}</span>
-                        <span>{task.date ?? "—"}</span>
-                        <span>{task.start_time ?? "—"}</span>
-                        <span>{task.status ?? "pending"}</span>
-                        <span>{task.priority}</span>
-                        <span>{task.type}</span>
-                        <span>{task.notes ?? "—"}</span>
-                        <span>{task.id}</span>
-                      </div>
-                    ))}
+                      Done
+                    </button>
+                    <button
+                      onClick={() => handleReminderAction(nowState.next_best_action!.id, "snooze_10")}
+                      className="rounded-lg bg-slate-100 px-4 py-2 text-slate-700"
+                    >
+                      Snooze 10
+                    </button>
+                    <button
+                      onClick={() => handleReminderAction(nowState.next_best_action!.id, "snooze_30")}
+                      className="rounded-lg bg-slate-100 px-4 py-2 text-slate-700"
+                    >
+                      Snooze 30
+                    </button>
+                    <button
+                      onClick={() => handleReminderAction(nowState.next_best_action!.id, "dismiss")}
+                      className="rounded-lg bg-slate-100 px-4 py-2 text-slate-700"
+                    >
+                      Dismiss
+                    </button>
                   </div>
                 </div>
-              ))
-            )}
-          </section>
-        </section>
-      )}
-
-      {activeTab === "add" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Quick Add</h2>
-                <p className="muted">Create a single task fast.</p>
+              ) : (
+                <p className="mt-4 text-sm text-slate-500">No reminders scheduled yet.</p>
+              )}
+            </div>
+            <div className="space-y-6">
+              <div className="bg-white rounded-2xl p-6 shadow-sm">
+                <h3 className="font-semibold">Next 6 hours</h3>
+                <ul className="mt-4 space-y-3">
+                  {nowState?.next_6_hours.map((item) => (
+                    <li key={item.id} className="flex items-center justify-between text-sm">
+                      <span>{item.title}</span>
+                      <span className="text-slate-500">{formatTime(item.scheduled_for)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="bg-white rounded-2xl p-6 shadow-sm">
+                <details>
+                  <summary className="cursor-pointer font-semibold">Later today</summary>
+                  <ul className="mt-4 space-y-3">
+                    {nowState?.later_today.map((item) => (
+                      <li key={item.id} className="flex items-center justify-between text-sm">
+                        <span>{item.title}</span>
+                        <span className="text-slate-500">{formatTime(item.scheduled_for)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               </div>
             </div>
-            <div className="form-grid">
-              <label className="field">
-                <span>Today</span>
-                <input
-                  type="date"
-                  value={todayInput}
-                  onChange={(event) => setTodayInput(event.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span>Title</span>
-                <input value={quickAdd.title} onChange={(event) => setQuickAdd({ ...quickAdd, title: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Date</span>
-                <input type="date" value={quickAdd.date} onChange={(event) => setQuickAdd({ ...quickAdd, date: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Time</span>
-                <input type="time" value={quickAdd.time} onChange={(event) => setQuickAdd({ ...quickAdd, time: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Type</span>
-                <select value={quickAdd.type} onChange={(event) => setQuickAdd({ ...quickAdd, type: event.target.value })}>
-                  <option value="task">Task</option>
-                  <option value="event">Event</option>
-                  <option value="reminder">Reminder</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Priority</span>
-                <input
-                  type="number"
-                  value={quickAdd.priority}
-                  onChange={(event) => setQuickAdd({ ...quickAdd, priority: Number(event.target.value) })}
-                />
-              </label>
-            </div>
-            <div className="actions">
-              <button onClick={handleQuickAdd}>Add</button>
-            </div>
           </section>
+        )}
 
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Paste Plan</h2>
-                <p className="muted">Parse a paragraph into tasks, then save them.</p>
-              </div>
-            </div>
-            <label className="field">
-              <span>Plan text</span>
-              <textarea value={pasteText} onChange={(event) => setPasteText(event.target.value)} rows={4} />
-            </label>
-            <div className="actions">
-              <button className="ghost" onClick={handlePasteParse}>
+        {activeTab === "Add" && (
+          <section className="grid gap-6 lg:grid-cols-[2fr,3fr]">
+            <div className="bg-white rounded-2xl p-6 shadow-sm space-y-4">
+              <h2 className="text-lg font-semibold">Type your plan</h2>
+              <textarea
+                rows={8}
+                value={planText}
+                onChange={(event) => setPlanText(event.target.value)}
+                className="w-full"
+                placeholder="Example: Pay rent tomorrow at 09:00, review budget Friday."
+              />
+              <button
+                onClick={handleParse}
+                className="rounded-lg bg-ocean px-4 py-2 text-white"
+              >
                 Parse
               </button>
-              <button onClick={handlePasteSave} disabled={!pasteText.trim()}>
-                Save to Tasks
-              </button>
-              <button onClick={handlePastePlan} disabled={pastePreview.length === 0}>
-                Plan Day
-              </button>
             </div>
-            {pastePreview.length > 0 && <ParsedItems items={pastePreview} />}
-          </section>
-        </section>
-      )}
-
-      {contextMenu && (
-        <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          {contextMenu.target.kind === "reminder" ? (
-            <>
-              <button onClick={() => handleMenuAction("done")}>Mark done</button>
-              <button onClick={() => handleMenuAction("snooze-10")}>Snooze 10m</button>
-              <button onClick={() => handleMenuAction("snooze-30")}>Snooze 30m</button>
-              <button onClick={() => handleMenuAction("snooze-60")}>Snooze 1h</button>
-              <button onClick={() => handleMenuAction("dismiss")}>Dismiss</button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => handleMenuAction("done")}>Mark done</button>
-              <button onClick={() => handleMenuAction("snooze-10")}>Snooze 10m</button>
-              <button onClick={() => handleMenuAction("snooze-30")}>Snooze 30m</button>
-              <button onClick={() => handleMenuAction("snooze-60")}>Snooze 1h</button>
-              <button onClick={() => handleMenuAction("reschedule")}>Reschedule…</button>
-              <button onClick={() => handleMenuAction("edit")}>Edit…</button>
-              <button onClick={() => handleMenuAction("delete")}>Delete</button>
-            </>
-          )}
-        </div>
-      )}
-
-      {modal && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="card-header">
-              <h2>{modal.mode === "edit" ? "Edit Task" : "Reschedule"}</h2>
-              <button className="ghost" onClick={() => setModal(null)}>
-                Close
-              </button>
-            </div>
-            <div className="form-grid">
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Title</span>
-                  <input
-                    value={modal.item.title}
-                    onChange={(event) => setModal({ ...modal, item: { ...modal.item, title: event.target.value } })}
-                  />
-                </label>
-              )}
-              <label className="field">
-                <span>Date</span>
-                <input
-                  type="date"
-                  value={modal.item.date ?? ""}
-                  onChange={(event) => setModal({ ...modal, item: { ...modal.item, date: event.target.value } })}
-                />
-              </label>
-              <label className="field">
-                <span>Time</span>
-                <input
-                  type="time"
-                  value={modal.item.start_time ?? ""}
-                  onChange={(event) => setModal({ ...modal, item: { ...modal.item, start_time: event.target.value } })}
-                />
-              </label>
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Type</span>
-                  <select
-                    value={modal.item.type}
-                    onChange={(event) =>
-                      setModal({ ...modal, item: { ...modal.item, type: event.target.value as ScheduleItem["type"] } })
-                    }
+            <div className="bg-white rounded-2xl p-6 shadow-sm">
+              <h3 className="font-semibold">Preview & edit</h3>
+              {parseItems.length === 0 ? (
+                <p className="mt-4 text-sm text-slate-500">Parsed items will appear here.</p>
+              ) : (
+                <div className="mt-4 space-y-4">
+                  {parseItems.map((item, index) => (
+                    <div key={index} className="rounded-xl border border-slate-100 p-4">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="text-sm">
+                          Title
+                          <input
+                            value={item.title}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setParseItems((prev) =>
+                                prev.map((entry, idx) =>
+                                  idx === index ? { ...entry, title: value } : entry
+                                )
+                              );
+                            }}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                        <label className="text-sm">
+                          Date
+                          <input
+                            type="date"
+                            value={item.date ?? ""}
+                            onChange={(event) => {
+                              const value = event.target.value || null;
+                              setParseItems((prev) =>
+                                prev.map((entry, idx) =>
+                                  idx === index ? { ...entry, date: value } : entry
+                                )
+                              );
+                            }}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                        <label className="text-sm">
+                          Due time
+                          <input
+                            type="time"
+                            value={item.due_time ?? ""}
+                            onChange={(event) => {
+                              const value = event.target.value || null;
+                              setParseItems((prev) =>
+                                prev.map((entry, idx) =>
+                                  idx === index ? { ...entry, due_time: value } : entry
+                                )
+                              );
+                            }}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                        <label className="text-sm">
+                          Priority
+                          <select
+                            value={item.priority}
+                            onChange={(event) => {
+                              const value = event.target.value as ParsedItem["priority"];
+                              setParseItems((prev) =>
+                                prev.map((entry, idx) =>
+                                  idx === index ? { ...entry, priority: value } : entry
+                                )
+                              );
+                            }}
+                            className="mt-1 w-full"
+                          >
+                            <option value="low">Low</option>
+                            <option value="med">Medium</option>
+                            <option value="high">High</option>
+                          </select>
+                        </label>
+                      </div>
+                      <p className="mt-3 text-xs text-slate-400">
+                        Confidence: {(item.confidence * 100).toFixed(0)}%
+                      </p>
+                    </div>
+                  ))}
+                  <button
+                    onClick={handleSaveParsed}
+                    className="rounded-lg bg-ink px-4 py-2 text-white"
                   >
-                    <option value="task">Task</option>
-                    <option value="event">Event</option>
-                    <option value="reminder">Reminder</option>
+                    Save tasks
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "Tasks" && (
+          <section className="space-y-6">
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search tasks"
+                className="min-w-[200px]"
+              />
+              <div className="flex gap-2">
+                {[
+                  { key: "today", label: "Today" },
+                  { key: "next7", label: "Next 7" },
+                  { key: "all", label: "All" },
+                ].map((option) => (
+                  <button
+                    key={option.key}
+                    onClick={() => setFilter(option.key)}
+                    className={`rounded-full px-4 py-2 ${
+                      filter === option.key ? "bg-ink text-white" : "bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid gap-4">
+              {filteredTasks.map((task) => (
+                <div key={task.id} className="rounded-2xl bg-white p-5 shadow-sm">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="text-lg font-semibold">{task.title}</h3>
+                      <p className="text-sm text-slate-500">
+                        {task.due_at
+                          ? `Due ${formatDateTime(task.due_at)}`
+                          : `Window ${formatDateTime(task.window_start)}`}
+                      </p>
+                      {task.notes && <p className="mt-2 text-sm text-slate-600">{task.notes}</p>}
+                    </div>
+                    <button
+                      onClick={() => handleTaskToggle(task)}
+                      className={`rounded-full px-3 py-1 text-xs ${
+                        task.status === "completed"
+                          ? "bg-emerald-100 text-emerald-700"
+                          : "bg-slate-100 text-slate-600"
+                      }`}
+                    >
+                      {task.status === "completed" ? "Completed" : "Mark done"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "Policy" && settings && (
+          <section className="max-w-3xl space-y-6">
+            <div className="rounded-2xl bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Policy</h2>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <label className="text-sm">
+                  Mode
+                  <select
+                    value={settings.policy_mode}
+                    onChange={(event) =>
+                      setSettings((prev) =>
+                        prev ? { ...prev, policy_mode: event.target.value as Settings["policy_mode"] } : prev
+                      )
+                    }
+                    className="mt-1 w-full"
+                  >
+                    <option value="baseline">Baseline</option>
+                    <option value="adaptive">Adaptive</option>
                   </select>
                 </label>
-              )}
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Priority</span>
+                <label className="text-sm">
+                  Daily budget
                   <input
                     type="number"
-                    value={modal.item.priority}
+                    value={settings.daily_budget}
                     onChange={(event) =>
-                      setModal({ ...modal, item: { ...modal.item, priority: Number(event.target.value) } })
+                      setSettings((prev) => (prev ? { ...prev, daily_budget: Number(event.target.value) } : prev))
                     }
+                    className="mt-1 w-full"
                   />
                 </label>
-              )}
-            </div>
-            <div className="actions">
+                <label className="text-sm">
+                  Quiet hours start
+                  <input
+                    type="time"
+                    value={settings.quiet_hours_start ?? ""}
+                    onChange={(event) =>
+                      setSettings((prev) =>
+                        prev ? { ...prev, quiet_hours_start: event.target.value } : prev
+                      )
+                    }
+                    className="mt-1 w-full"
+                  />
+                </label>
+                <label className="text-sm">
+                  Quiet hours end
+                  <input
+                    type="time"
+                    value={settings.quiet_hours_end ?? ""}
+                    onChange={(event) =>
+                      setSettings((prev) => (prev ? { ...prev, quiet_hours_end: event.target.value } : prev))
+                    }
+                    className="mt-1 w-full"
+                  />
+                </label>
+                <label className="text-sm">
+                  Lead time (min)
+                  <input
+                    type="number"
+                    value={settings.lead_time_min}
+                    onChange={(event) =>
+                      setSettings((prev) => (prev ? { ...prev, lead_time_min: Number(event.target.value) } : prev))
+                    }
+                    className="mt-1 w-full"
+                  />
+                </label>
+              </div>
               <button
-                onClick={async () => {
-                  if (!modal.item.id) return;
-                  await api.updateTask(modal.item.id, {
-                    title: modal.item.title,
-                    date: modal.item.date,
-                    start_time: modal.item.start_time,
-                    type: modal.item.type,
-                    priority: modal.item.priority,
-                  });
-                  await loadTasks();
-                  setModal(null);
-                }}
+                onClick={handleSettingsSave}
+                className="mt-4 rounded-lg bg-ink px-4 py-2 text-white"
               >
-                Save
+                Save settings
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </section>
+        )}
 
-      {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Working...</p>}
+        {activeTab === "Insights" && (
+          <section className="grid gap-6">
+            <div className="rounded-2xl bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Notifications vs completions</h2>
+              {insights && (
+                <div className="mt-4 h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={insights.notifications_per_day}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        name="Notifications"
+                        fill="#0ea5e9"
+                        stroke="#0284c7"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+            <div className="rounded-2xl bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Completions per day</h2>
+              {insights && (
+                <div className="mt-4 h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={insights.completions_per_day}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        name="Completions"
+                        fill="#34d399"
+                        stroke="#059669"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+            <div className="rounded-2xl bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Notifications per completion</h2>
+              {insights && (
+                <div className="mt-4 h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={insights.notifications_per_completion}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        name="Ratio"
+                        fill="#fbbf24"
+                        stroke="#f59e0b"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+            <div className="rounded-2xl bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold">Missed rate proxy</h2>
+              {insights && (
+                <div className="mt-4 h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={insights.missed_rate_proxy}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" />
+                      <YAxis />
+                      <Tooltip />
+                      <Legend />
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        name="Missed"
+                        fill="#f87171"
+                        stroke="#ef4444"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+      </main>
+
+      <footer className="border-t border-slate-200 bg-white">
+        <div className="mx-auto max-w-6xl px-6 py-6 text-xs text-slate-500">
+          Notifications use the browser Notifications API and only work while this app is open.
+        </div>
+      </footer>
     </div>
   );
 }

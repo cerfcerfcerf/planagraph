@@ -1,12 +1,36 @@
-# Plangraph MVP (Infomatrix Gold)
+# Plangraph (Life OS)
 
-A local-first full-stack app that parses natural-language plans with Ollama, builds an explainable schedule, and runs a reminder + habit engine on top of SQLite persistence.
+Local-first planning OS with SQLite persistence, a minimal policy engine, and a focused LLM workflow (only plan parsing + short “why now” explanations).
 
-## Prerequisites
+## Stack
 
-- Python 3.12
-- Node.js 18+
-- Ollama running locally at `http://localhost:11434` with the `llama3.1:8b` model
+- **Backend**: Python 3.11+, FastAPI, SQLAlchemy, SQLite
+- **Frontend**: React + Vite + TypeScript + Tailwind
+- **Charts**: Recharts
+- **Scheduler**: in-process loop checking reminders every 30 seconds
+- **Notifications**: Browser Notifications API (only while app is open)
+
+## Environment
+
+Create `backend/.env` from `backend/.env.example`:
+
+```bash
+DB_PATH=plangraph.db
+USE_LLM=true
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=llama3.1
+ALLOW_SEED=true
+```
+
+### LLM configuration
+
+The backend uses an OpenAI-compatible chat/completions API. Defaults target a local Ollama server.
+
+- **Local LLM (default)**: nothing to change.
+- **OpenAI-compatible endpoint**: set `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` to match your provider.
+
+If the LLM output is invalid JSON or fails validation, the backend falls back to a deterministic parser.
 
 ## Run backend
 
@@ -26,12 +50,22 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` to use the app. The UI is organized into Now, Tasks, and Add screens.
+Open `http://localhost:5173`.
 
-## How reminders work
+## Seed data (dev only)
 
-- **Event reminders** are created for each planned item with a start time (lead times by type).
-- **Contextual reminders** attach untimed reminders to the earliest anchor event.
-- **Habit reminders** learn from completions and schedule around the median completion time.
+```bash
+curl -X POST http://localhost:8000/seed
+```
 
-The planner is deterministic and explainable. The LLM is only used for parsing text into structured items.
+Enable with `ALLOW_SEED=true` in `backend/.env`.
+
+## Reminders + policy notes
+
+- **Baseline**: one reminder at `due_at - lead_time` (or `window_start` for flexible tasks).
+- **Adaptive**: recurring tasks learn preferred time-of-day from completion events, then schedule inside the window.
+- **Daily budget** and **quiet hours** are enforced when scheduling.
+
+## Notification limitation
+
+Browser notifications only fire while the app is open in a tab. The backend does not send system-level notifications.
