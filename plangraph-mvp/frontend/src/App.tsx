@@ -1,725 +1,476 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { api } from "./api";
-import ParsedItems from "./components/ParsedItems";
-import type { PlannedItem, Reminder, ScheduleItem } from "./types";
-import "./App.css";
+import type { InsightsResponse, NowResponse, ParsedItem, Settings, Task } from "./types";
 
-const DAY_START = "07:00";
-const DAY_END = "21:00";
+const tabs = ["Now", "Add", "Tasks", "Policy", "Insights"] as const;
 
-const initialText =
-  "Tomorrow school at 8. Take pills at 7:30. After school buy snacks. Don't forget headphones.";
-
-const formatDate = (value: Date) => value.toISOString().slice(0, 10);
-
-const addDays = (value: string, days: number) => {
-  const [year, month, day] = value.split("-").map(Number);
-  const base = new Date(year, month - 1, day);
-  base.setDate(base.getDate() + days);
-  return formatDate(base);
+const priorityStyles: Record<string, string> = {
+  high: "bg-rose-500/20 text-rose-100",
+  med: "bg-amber-500/20 text-amber-100",
+  low: "bg-emerald-500/20 text-emerald-100",
 };
 
-const toMinutes = (timeValue: string) => {
-  const [hours, minutes] = timeValue.split(":").map(Number);
-  return hours * 60 + minutes;
-};
+function App() {
+  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Now");
+  const [nowState, setNowState] = useState<NowResponse | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [insights, setInsights] = useState<InsightsResponse | null>(null);
+  const [planText, setPlanText] = useState("");
+  const [parsedItems, setParsedItems] = useState<ParsedItem[]>([]);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("today");
+  const [notificationEnabled, setNotificationEnabled] = useState(false);
 
-const addMinutes = (timeValue: string, minutesToAdd: number) => {
-  const total = toMinutes(timeValue) + minutesToAdd;
-  const hours = Math.floor((total + 1440) % 1440 / 60);
-  const minutes = (total + 1440) % 60;
-  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
-};
+  const refreshNow = () => api.getNow().then(setNowState).catch(() => undefined);
+  const refreshTasks = () => api.listTasks().then((data) => setTasks(data.items));
 
-const tabs = [
-  { id: "now", label: "Now" },
-  { id: "tasks", label: "Tasks" },
-  { id: "add", label: "Add" },
-] as const;
+  useEffect(() => {
+    refreshNow();
+    refreshTasks();
+    api.getSettings().then(setSettings).catch(() => undefined);
+    api.getInsights().then(setInsights).catch(() => undefined);
+  }, []);
 
-type ContextTarget =
-  | { kind: "task"; item: ScheduleItem }
-  | { kind: "planned"; item: PlannedItem }
-  | { kind: "reminder"; reminder: Reminder };
+  useEffect(() => {
+    const interval = setInterval(refreshNow, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
-export default function App() {
-  const today = useMemo(() => formatDate(new Date()), []);
-  const [text, setText] = useState(initialText);
-  const [todayInput, setTodayInput] = useState(today);
-  const [items, setItems] = useState<ScheduleItem[]>([]);
-  const [plannedItems, setPlannedItems] = useState<PlannedItem[]>([]);
-  const [conflicts, setConflicts] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]["id"]>("now");
-  const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [notificationStatus, setNotificationStatus] = useState(
-    typeof Notification !== "undefined" ? Notification.permission : "unsupported"
-  );
-  const notifiedIds = useRef<Set<number>>(new Set());
-
-  const [taskFilterRange, setTaskFilterRange] = useState<"today" | "week" | "all">("today");
-  const [taskFilterType, setTaskFilterType] = useState("all");
-  const [taskFilterStatus, setTaskFilterStatus] = useState("pending");
-  const [taskSearch, setTaskSearch] = useState("");
-  const [tasks, setTasks] = useState<ScheduleItem[]>([]);
-
-  const [quickAdd, setQuickAdd] = useState({
-    title: "",
-    date: today,
-    time: "",
-    type: "task",
-    priority: 1,
-  });
-  const [pasteText, setPasteText] = useState("");
-  const [pastePreview, setPastePreview] = useState<ScheduleItem[]>([]);
-
-  const [contextMenu, setContextMenu] = useState<{
-    target: ContextTarget;
-    x: number;
-    y: number;
-  } | null>(null);
-  const [modal, setModal] = useState<{
-    mode: "edit" | "reschedule";
-    item: ScheduleItem;
-  } | null>(null);
-  const [laterTodayOpen, setLaterTodayOpen] = useState(false);
-
-  const parseItems = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api.parse(text, todayInput);
-      setItems(data.items);
-      setPlannedItems([]);
-      setConflicts([]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    if (nowState?.next_reminder_id && notificationEnabled && Notification.permission === "granted") {
+      new Notification("Plangraph reminder", {
+        body: nowState.next_best_action?.title || "You have a reminder.",
+      });
     }
-  };
+  }, [nowState, notificationEnabled]);
 
-  const planDay = async (overrideItems?: ScheduleItem[]) => {
-    setLoading(true);
-    setError(null);
-    const includesTomorrow = text.toLowerCase().includes("tomorrow");
-    const day = includesTomorrow ? addDays(todayInput, 1) : todayInput;
-
-    try {
-      const data = await api.plan(day, DAY_START, DAY_END, overrideItems ?? items);
-      setPlannedItems(data.planned);
-      setConflicts(data.conflicts);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const refreshReminders = async () => {
-    try {
-      const data = await api.remindersDue();
-      setReminders(data.reminders);
-      if (notificationStatus === "granted") {
-        data.reminders.forEach((reminder) => {
-          if (notifiedIds.current.has(reminder.id)) {
-            return;
-          }
-          notifiedIds.current.add(reminder.id);
-          new Notification(reminder.title, {
-            body: reminder.body ?? "Reminder is due.",
-          });
-        });
+  const filteredTasks = useMemo(() => {
+    const now = new Date();
+    const weekAhead = new Date(now);
+    weekAhead.setDate(now.getDate() + 7);
+    return tasks.filter((task) => {
+      if (search && !task.title.toLowerCase().includes(search.toLowerCase())) {
+        return false;
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
-    }
-  };
-
-  const handleEnableNotifications = () => {
-    if (typeof Notification === "undefined") {
-      setNotificationStatus("unsupported");
-      return;
-    }
-    Notification.requestPermission().then((permission) => setNotificationStatus(permission));
-  };
-
-  const handleReminderAction = async (id: number, action: "dismiss" | "snooze" | "done", snoozeMin?: number) => {
-    await api.ackReminder(id, action, snoozeMin);
-    await refreshReminders();
-  };
-
-  const loadTasks = async () => {
-    const range = taskFilterRange;
-    let from: string | undefined;
-    let to: string | undefined;
-    if (range === "today") {
-      from = today;
-      to = today;
-    } else if (range === "week") {
-      from = today;
-      to = addDays(today, 7);
-    }
-    const typeFilter = taskFilterType === "all" ? undefined : taskFilterType;
-    const statusFilter = taskFilterStatus === "all" ? undefined : taskFilterStatus;
-    const data = await api.tasks({
-      from,
-      to,
-      type: typeFilter,
-      status: statusFilter,
-      q: taskSearch || undefined,
+      const due = task.due_at ? new Date(task.due_at) : task.window_start ? new Date(task.window_start) : null;
+      if (filter === "today") {
+        return due && due.toDateString() === now.toDateString();
+      }
+      if (filter === "next7") {
+        return due && due <= weekAhead;
+      }
+      return true;
     });
-    setTasks(data.items);
+  }, [tasks, search, filter]);
+
+  const handleParse = async () => {
+    const data = await api.parsePlan(planText);
+    setParsedItems(data.items);
   };
 
-  const handleQuickAdd = async () => {
-    if (!quickAdd.title.trim()) {
-      return;
+  const handleSaveParsed = async () => {
+    for (const item of parsedItems) {
+      const dueAt = item.date && item.due_time ? `${item.date}T${item.due_time}:00` : null;
+      await api.createTask({
+        title: item.title,
+        notes: item.notes,
+        priority: item.priority,
+        recurrence: item.recurrence === "none" ? null : item.recurrence,
+        due_at: dueAt,
+        window_start: item.window_start,
+        window_end: item.window_end,
+        status: "active",
+      });
     }
-    await api.createTask({
-      title: quickAdd.title,
-      type: quickAdd.type as "task" | "event" | "reminder",
-      date: quickAdd.date,
-      start_time: quickAdd.time || null,
-      duration_min: 0,
-      priority: quickAdd.priority,
-    });
-    setQuickAdd({ title: "", date: today, time: "", type: "task", priority: 1 });
-    await loadTasks();
+    setPlanText("");
+    setParsedItems([]);
+    refreshTasks();
+    refreshNow();
   };
 
-  const handlePasteParse = async () => {
-    const data = await api.parse(pasteText, todayInput);
-    setPastePreview(data.items);
+  const requestNotifications = async () => {
+    const permission = await Notification.requestPermission();
+    setNotificationEnabled(permission === "granted");
   };
-
-  const handlePasteSave = async () => {
-    if (!pasteText.trim()) {
-      return;
-    }
-    await api.createEntry(pasteText, todayInput);
-    setPasteText("");
-    setPastePreview([]);
-    await loadTasks();
-  };
-
-  const handlePastePlan = async () => {
-    if (pastePreview.length === 0) {
-      return;
-    }
-    setItems(pastePreview);
-    setText(pasteText);
-    await planDay(pastePreview);
-    setActiveTab("now");
-  };
-
-  const handleContextMenu = (event: React.MouseEvent, target: ContextTarget) => {
-    event.preventDefault();
-    setContextMenu({ target, x: event.clientX, y: event.clientY });
-  };
-
-  const handleMenuClose = () => setContextMenu(null);
-
-  const handleMenuAction = async (action: string) => {
-    if (!contextMenu) return;
-    const { target } = contextMenu;
-    if (target.kind === "reminder") {
-      if (action === "done") await handleReminderAction(target.reminder.id, "done");
-      if (action === "dismiss") await handleReminderAction(target.reminder.id, "dismiss");
-      if (action === "snooze-10") await handleReminderAction(target.reminder.id, "snooze", 10);
-      if (action === "snooze-30") await handleReminderAction(target.reminder.id, "snooze", 30);
-      if (action === "snooze-60") await handleReminderAction(target.reminder.id, "snooze", 60);
-    } else {
-      const item = target.item;
-      if (!item.id) {
-        handleMenuClose();
-        return;
-      }
-      if (action === "done") await api.completeTask(item.id);
-      if (action === "delete") await api.deleteTask(item.id);
-      if (action === "snooze-10" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 10) });
-      }
-      if (action === "snooze-30" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 30) });
-      }
-      if (action === "snooze-60" && item.start_time) {
-        await api.updateTask(item.id, { start_time: addMinutes(item.start_time, 60) });
-      }
-      if (action === "edit") setModal({ mode: "edit", item });
-      if (action === "reschedule") setModal({ mode: "reschedule", item });
-      await loadTasks();
-    }
-    handleMenuClose();
-  };
-
-  useEffect(() => {
-    refreshReminders().catch(() => undefined);
-    const interval = window.setInterval(() => {
-      refreshReminders().catch(() => undefined);
-    }, 15000);
-    return () => window.clearInterval(interval);
-  }, [notificationStatus]);
-
-  useEffect(() => {
-    loadTasks().catch(() => undefined);
-  }, [taskFilterRange, taskFilterType, taskFilterStatus, taskSearch, activeTab]);
-
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handleClick = () => setContextMenu(null);
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(null);
-    };
-    window.addEventListener("click", handleClick);
-    window.addEventListener("keydown", handleKey);
-    return () => {
-      window.removeEventListener("click", handleClick);
-      window.removeEventListener("keydown", handleKey);
-    };
-  }, [contextMenu]);
-
-  const nowMinutes = toMinutes(
-    `${new Date().getHours().toString().padStart(2, "0")}:${new Date().getMinutes().toString().padStart(2, "0")}`
-  );
-  const upcoming = plannedItems.filter(
-    (item) =>
-      item.planned_start &&
-      toMinutes(item.planned_start) >= nowMinutes &&
-      toMinutes(item.planned_start) < nowMinutes + 360
-  );
-  const laterToday = plannedItems.filter(
-    (item) => item.planned_start && toMinutes(item.planned_start) >= nowMinutes + 360
-  );
-
-  const groupedTasks = tasks.reduce<Record<string, ScheduleItem[]>>((acc, task) => {
-    const key = task.date || "No date";
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(task);
-    return acc;
-  }, {});
 
   return (
-    <div className="app">
-      <header className="hero">
-        <div>
-          <h1>Plangraph MVP</h1>
-          <p>Fast, local scheduling with reminders and smart task placement.</p>
-        </div>
-        <div className="hero-meta">
-          <span className="pill">Now / Tasks / Add</span>
-          <span className="pill">Local Ollama</span>
-        </div>
-      </header>
-
-      <nav className="tabs">
-        {tabs.map((tab) => (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="mx-auto max-w-6xl px-6 py-8">
+        <header className="mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold">Plangraph (Life OS)</h1>
+            <p className="text-slate-300">Local-first plans, reminders, and adaptive nudges.</p>
+          </div>
           <button
-            key={tab.id}
-            className={`tab ${activeTab === tab.id ? "active" : ""}`}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={requestNotifications}
+            className="rounded-full bg-slate-800 px-4 py-2 text-sm text-slate-100 hover:bg-slate-700"
           >
-            {tab.label}
+            {notificationEnabled ? "Notifications enabled" : "Enable notifications"}
           </button>
-        ))}
-      </nav>
+        </header>
 
-      {activeTab === "now" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Due Now</h2>
-                <p className="muted">Reminders ready for action.</p>
-              </div>
-              <button className="ghost" onClick={handleEnableNotifications}>
-                Enable notifications ({notificationStatus})
-              </button>
-            </div>
-            {reminders.length === 0 ? (
-              <p className="muted">Nothing due yet.</p>
-            ) : (
-              <div className="reminder-grid">
-                {reminders.map((reminder) => (
-                  <div
-                    className="reminder-card"
-                    key={reminder.id}
-                    onContextMenu={(event) => handleContextMenu(event, { kind: "reminder", reminder })}
-                  >
-                    <div className="reminder-header">
-                      <div>
-                        <h3>{reminder.title}</h3>
-                        <p className="muted">Due {new Date(reminder.due_at).toLocaleString()}</p>
-                      </div>
-                      <span className="pill pill-secondary">{reminder.kind}</span>
-                    </div>
-                    <p>{reminder.body ?? "No details"}</p>
-                    <p className="muted">{reminder.reason ?? "No reason provided."}</p>
-                    <div className="actions">
-                      <button onClick={() => handleReminderAction(reminder.id, "done")}>Done</button>
-                      <button className="ghost" onClick={() => handleReminderAction(reminder.id, "snooze", 10)}>
-                        Snooze 10m
-                      </button>
-                      <button className="ghost" onClick={() => handleReminderAction(reminder.id, "dismiss")}>
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+        <nav className="mb-8 flex flex-wrap gap-3">
+          {tabs.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                activeTab === tab ? "bg-indigo-500 text-white" : "bg-slate-800 text-slate-200"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </nav>
 
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Next 6 hours</h2>
-                <p className="muted">What is coming up based on the latest plan.</p>
-              </div>
-              <span className="pill">{upcoming.length} items</span>
-            </div>
-            {upcoming.length === 0 ? (
-              <p className="muted">No upcoming items yet. Plan your day to see them here.</p>
-            ) : (
-              <div className="timeline">
-                {upcoming.map((item, index) => (
-                  <div
-                    className="timeline-row"
-                    key={`${item.title}-${index}`}
-                    onContextMenu={(event) => handleContextMenu(event, { kind: "planned", item })}
-                  >
-                    <div className="timeline-time">
-                      {item.planned_start}–{item.planned_end}
+        {activeTab === "Now" && nowState && (
+          <section className="grid gap-6 lg:grid-cols-[2fr,1fr]">
+            <div className="rounded-2xl bg-slate-900/70 p-6 shadow">
+              <h2 className="text-xl font-semibold">Next best action</h2>
+              <p className="mt-1 text-slate-300">{nowState.why_now}</p>
+              {nowState.next_best_action ? (
+                <div className="mt-6 rounded-xl bg-slate-800/60 p-4">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="text-lg font-semibold">{nowState.next_best_action.title}</p>
+                      <p className="text-sm text-slate-300">
+                        Due {nowState.next_best_action.due_at || nowState.next_best_action.window_start || "flex"}
+                      </p>
                     </div>
-                    <div className="timeline-dot" />
-                    <div className="timeline-card">
-                      <div className="timeline-header">
-                        <h3>{item.title}</h3>
-                        <span className="pill pill-secondary">{item.type}</span>
-                      </div>
-                      <p className="muted">{item.reason ?? "Scheduled item"}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Later Today</h2>
-                <p className="muted">Collapsed by default.</p>
-              </div>
-              <button className="ghost" onClick={() => setLaterTodayOpen((prev) => !prev)}>
-                {laterTodayOpen ? "Hide" : "Show"}
-              </button>
-            </div>
-            {laterTodayOpen && (
-              <div className="timeline">
-                {laterToday.length === 0 ? (
-                  <p className="muted">No later items.</p>
-                ) : (
-                  laterToday.map((item, index) => (
-                    <div
-                      className="timeline-row"
-                      key={`${item.title}-later-${index}`}
-                      onContextMenu={(event) => handleContextMenu(event, { kind: "planned", item })}
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs ${
+                        priorityStyles[nowState.next_best_action.priority] || "bg-slate-700"
+                      }`}
                     >
-                      <div className="timeline-time">
-                        {item.planned_start}–{item.planned_end}
-                      </div>
-                      <div className="timeline-dot" />
-                      <div className="timeline-card">
-                        <div className="timeline-header">
-                          <h3>{item.title}</h3>
-                          <span className="pill pill-secondary">{item.type}</span>
-                        </div>
-                        <p className="muted">{item.reason ?? "Scheduled item"}</p>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </section>
-        </section>
-      )}
-
-      {activeTab === "tasks" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>All Tasks</h2>
-                <p className="muted">Manage everything across days and types.</p>
-              </div>
-            </div>
-            <div className="form-grid">
-              <label className="field">
-                <span>Range</span>
-                <select value={taskFilterRange} onChange={(event) => setTaskFilterRange(event.target.value as "today" | "week" | "all")}>
-                  <option value="today">Today</option>
-                  <option value="week">This week</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Type</span>
-                <select value={taskFilterType} onChange={(event) => setTaskFilterType(event.target.value)}>
-                  <option value="all">All</option>
-                  <option value="task">Task</option>
-                  <option value="event">Event</option>
-                  <option value="reminder">Reminder</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Status</span>
-                <select value={taskFilterStatus} onChange={(event) => setTaskFilterStatus(event.target.value)}>
-                  <option value="pending">Pending</option>
-                  <option value="done">Done</option>
-                  <option value="dismissed">Dismissed</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Search</span>
-                <input value={taskSearch} onChange={(event) => setTaskSearch(event.target.value)} placeholder="Search tasks" />
-              </label>
-            </div>
-
-            {Object.keys(groupedTasks).length === 0 ? (
-              <p className="muted">No tasks match the filters.</p>
-            ) : (
-              Object.entries(groupedTasks).map(([dateKey, grouped]) => (
-                <div key={dateKey} className="group-block">
-                  <h3>{dateKey}</h3>
-                  <div className="table table-parsed">
-                    <div className="table-row table-header">
-                      <span>Title</span>
-                      <span>Date</span>
-                      <span>Time</span>
-                      <span>Status</span>
-                      <span>Priority</span>
-                      <span>Type</span>
-                      <span>Notes</span>
-                      <span>ID</span>
-                    </div>
-                    {grouped.map((task) => (
-                      <div
-                        className="table-row"
-                        key={task.id}
-                        onContextMenu={(event) => handleContextMenu(event, { kind: "task", item: task })}
-                      >
-                        <span>{task.title}</span>
-                        <span>{task.date ?? "—"}</span>
-                        <span>{task.start_time ?? "—"}</span>
-                        <span>{task.status ?? "pending"}</span>
-                        <span>{task.priority}</span>
-                        <span>{task.type}</span>
-                        <span>{task.notes ?? "—"}</span>
-                        <span>{task.id}</span>
-                      </div>
-                    ))}
+                      {nowState.next_best_action.priority}
+                    </span>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <ActionButton
+                      label="Done"
+                      onClick={() =>
+                        nowState.next_reminder_id &&
+                        api.reminderAction(nowState.next_reminder_id, "done").then(refreshNow)
+                      }
+                    />
+                    <ActionButton
+                      label="Snooze 10"
+                      onClick={() =>
+                        nowState.next_reminder_id &&
+                        api.reminderAction(nowState.next_reminder_id, "snooze_10").then(refreshNow)
+                      }
+                    />
+                    <ActionButton
+                      label="Snooze 30"
+                      onClick={() =>
+                        nowState.next_reminder_id &&
+                        api.reminderAction(nowState.next_reminder_id, "snooze_30").then(refreshNow)
+                      }
+                    />
+                    <ActionButton
+                      label="Dismiss"
+                      onClick={() =>
+                        nowState.next_reminder_id &&
+                        api.reminderAction(nowState.next_reminder_id, "dismiss").then(refreshNow)
+                      }
+                    />
                   </div>
                 </div>
-              ))
-            )}
-          </section>
-        </section>
-      )}
+              ) : (
+                <p className="mt-4 text-sm text-slate-400">No immediate tasks. Add something new.</p>
+              )}
+            </div>
 
-      {activeTab === "add" && (
-        <section className="stack">
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Quick Add</h2>
-                <p className="muted">Create a single task fast.</p>
+            <div className="space-y-4">
+              <Panel title="Next 6 hours">
+                {nowState.next_6_hours.length ? (
+                  <ul className="space-y-2">
+                    {nowState.next_6_hours.map((item) => (
+                      <li key={item.task_id} className="rounded-lg bg-slate-800/60 p-3 text-sm">
+                        <div className="flex items-center justify-between">
+                          <span>{item.title}</span>
+                          <span className="text-xs text-slate-300">
+                            {item.due_at || item.window_start || "flex"}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-slate-400">No upcoming tasks.</p>
+                )}
+              </Panel>
+              <Panel title="Later today">
+                {nowState.later_today.length ? (
+                  <ul className="space-y-2">
+                    {nowState.later_today.map((item) => (
+                      <li key={item.task_id} className="rounded-lg bg-slate-800/60 p-3 text-sm">
+                        <div className="flex items-center justify-between">
+                          <span>{item.title}</span>
+                          <span className="text-xs text-slate-300">
+                            {item.due_at || item.window_start || "flex"}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-slate-400">Nothing else scheduled.</p>
+                )}
+              </Panel>
+            </div>
+          </section>
+        )}
+
+        {activeTab === "Add" && (
+          <section className="grid gap-6 lg:grid-cols-[1.2fr,1fr]">
+            <div className="rounded-2xl bg-slate-900/70 p-6 shadow">
+              <h2 className="text-xl font-semibold">Type your plan</h2>
+              <textarea
+                value={planText}
+                onChange={(event) => setPlanText(event.target.value)}
+                className="mt-4 h-40 w-full rounded-xl border border-slate-700 bg-white/90 p-4 text-sm text-slate-900"
+                placeholder="Example: tomorrow 9am dentist; weekly review Friday 4pm"
+              />
+              <div className="mt-4 flex gap-3">
+                <button
+                  onClick={handleParse}
+                  className="rounded-full bg-indigo-500 px-4 py-2 text-sm font-medium text-white"
+                >
+                  Parse
+                </button>
+                <button
+                  onClick={() => {
+                    setPlanText("");
+                    setParsedItems([]);
+                  }}
+                  className="rounded-full bg-slate-800 px-4 py-2 text-sm text-slate-200"
+                >
+                  Clear
+                </button>
               </div>
             </div>
-            <div className="form-grid">
-              <label className="field">
-                <span>Today</span>
+            <div className="rounded-2xl bg-slate-900/70 p-6 shadow">
+              <h2 className="text-xl font-semibold">Preview</h2>
+              {parsedItems.length ? (
+                <div className="mt-4 space-y-3">
+                  {parsedItems.map((item, index) => (
+                    <div key={`${item.title}-${index}`} className="rounded-xl bg-slate-800/60 p-4">
+                      <input
+                        value={item.title}
+                        onChange={(event) => {
+                          const next = [...parsedItems];
+                          next[index] = { ...item, title: event.target.value };
+                          setParsedItems(next);
+                        }}
+                        className="w-full rounded-lg border border-slate-600 bg-white px-3 py-2 text-sm"
+                      />
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
+                        <span>{item.date || "today"}</span>
+                        <span>{item.due_time || "flex window"}</span>
+                        <span className={`rounded-full px-2 py-0.5 ${priorityStyles[item.priority]}`}>
+                          {item.priority}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    onClick={handleSaveParsed}
+                    className="w-full rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950"
+                  >
+                    Save tasks
+                  </button>
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-slate-400">Parse a plan to preview tasks.</p>
+              )}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "Tasks" && (
+          <section className="rounded-2xl bg-slate-900/70 p-6 shadow">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-1 gap-3">
                 <input
-                  type="date"
-                  value={todayInput}
-                  onChange={(event) => setTodayInput(event.target.value)}
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search tasks"
+                  className="w-full rounded-full border border-slate-700 bg-white px-4 py-2 text-sm"
                 />
-              </label>
-              <label className="field">
-                <span>Title</span>
-                <input value={quickAdd.title} onChange={(event) => setQuickAdd({ ...quickAdd, title: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Date</span>
-                <input type="date" value={quickAdd.date} onChange={(event) => setQuickAdd({ ...quickAdd, date: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Time</span>
-                <input type="time" value={quickAdd.time} onChange={(event) => setQuickAdd({ ...quickAdd, time: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>Type</span>
-                <select value={quickAdd.type} onChange={(event) => setQuickAdd({ ...quickAdd, type: event.target.value })}>
-                  <option value="task">Task</option>
-                  <option value="event">Event</option>
-                  <option value="reminder">Reminder</option>
+                <select
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  className="rounded-full border border-slate-700 bg-white px-4 py-2 text-sm"
+                >
+                  <option value="today">Today</option>
+                  <option value="next7">Next 7</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+            </div>
+            <div className="mt-6 space-y-3">
+              {filteredTasks.map((task) => (
+                <div key={task.id} className="flex items-center justify-between rounded-xl bg-slate-800/60 p-4">
+                  <div>
+                    <p className="text-sm font-semibold">{task.title}</p>
+                    <p className="text-xs text-slate-300">
+                      {task.due_at || task.window_start || "flex"} · {task.status}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      api.updateTask(task.id, { status: task.status === "completed" ? "active" : "completed" }).then(
+                        refreshTasks
+                      )
+                    }
+                    className="rounded-full bg-slate-700 px-3 py-1 text-xs text-slate-100"
+                  >
+                    {task.status === "completed" ? "Reopen" : "Complete"}
+                  </button>
+                </div>
+              ))}
+              {!filteredTasks.length && <p className="text-sm text-slate-400">No tasks match.</p>}
+            </div>
+          </section>
+        )}
+
+        {activeTab === "Policy" && settings && (
+          <section className="rounded-2xl bg-slate-900/70 p-6 shadow">
+            <h2 className="text-xl font-semibold">Policy settings</h2>
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <label className="flex flex-col gap-2 text-sm">
+                Mode
+                <select
+                  value={settings.policy_mode}
+                  onChange={(event) =>
+                    setSettings({ ...settings, policy_mode: event.target.value as Settings["policy_mode"] })
+                  }
+                  className="rounded-lg border border-slate-700 bg-white px-3 py-2"
+                >
+                  <option value="baseline">Baseline</option>
+                  <option value="adaptive">Adaptive</option>
                 </select>
               </label>
-              <label className="field">
-                <span>Priority</span>
+              <label className="flex flex-col gap-2 text-sm">
+                Daily notification budget
                 <input
                   type="number"
-                  value={quickAdd.priority}
-                  onChange={(event) => setQuickAdd({ ...quickAdd, priority: Number(event.target.value) })}
+                  value={settings.daily_budget}
+                  onChange={(event) => setSettings({ ...settings, daily_budget: Number(event.target.value) })}
+                  className="rounded-lg border border-slate-700 bg-white px-3 py-2"
                 />
               </label>
-            </div>
-            <div className="actions">
-              <button onClick={handleQuickAdd}>Add</button>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <h2>Paste Plan</h2>
-                <p className="muted">Parse a paragraph into tasks, then save them.</p>
-              </div>
-            </div>
-            <label className="field">
-              <span>Plan text</span>
-              <textarea value={pasteText} onChange={(event) => setPasteText(event.target.value)} rows={4} />
-            </label>
-            <div className="actions">
-              <button className="ghost" onClick={handlePasteParse}>
-                Parse
-              </button>
-              <button onClick={handlePasteSave} disabled={!pasteText.trim()}>
-                Save to Tasks
-              </button>
-              <button onClick={handlePastePlan} disabled={pastePreview.length === 0}>
-                Plan Day
-              </button>
-            </div>
-            {pastePreview.length > 0 && <ParsedItems items={pastePreview} />}
-          </section>
-        </section>
-      )}
-
-      {contextMenu && (
-        <div className="context-menu" style={{ top: contextMenu.y, left: contextMenu.x }}>
-          {contextMenu.target.kind === "reminder" ? (
-            <>
-              <button onClick={() => handleMenuAction("done")}>Mark done</button>
-              <button onClick={() => handleMenuAction("snooze-10")}>Snooze 10m</button>
-              <button onClick={() => handleMenuAction("snooze-30")}>Snooze 30m</button>
-              <button onClick={() => handleMenuAction("snooze-60")}>Snooze 1h</button>
-              <button onClick={() => handleMenuAction("dismiss")}>Dismiss</button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => handleMenuAction("done")}>Mark done</button>
-              <button onClick={() => handleMenuAction("snooze-10")}>Snooze 10m</button>
-              <button onClick={() => handleMenuAction("snooze-30")}>Snooze 30m</button>
-              <button onClick={() => handleMenuAction("snooze-60")}>Snooze 1h</button>
-              <button onClick={() => handleMenuAction("reschedule")}>Reschedule…</button>
-              <button onClick={() => handleMenuAction("edit")}>Edit…</button>
-              <button onClick={() => handleMenuAction("delete")}>Delete</button>
-            </>
-          )}
-        </div>
-      )}
-
-      {modal && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="card-header">
-              <h2>{modal.mode === "edit" ? "Edit Task" : "Reschedule"}</h2>
-              <button className="ghost" onClick={() => setModal(null)}>
-                Close
-              </button>
-            </div>
-            <div className="form-grid">
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Title</span>
-                  <input
-                    value={modal.item.title}
-                    onChange={(event) => setModal({ ...modal, item: { ...modal.item, title: event.target.value } })}
-                  />
-                </label>
-              )}
-              <label className="field">
-                <span>Date</span>
-                <input
-                  type="date"
-                  value={modal.item.date ?? ""}
-                  onChange={(event) => setModal({ ...modal, item: { ...modal.item, date: event.target.value } })}
-                />
-              </label>
-              <label className="field">
-                <span>Time</span>
+              <label className="flex flex-col gap-2 text-sm">
+                Quiet hours start
                 <input
                   type="time"
-                  value={modal.item.start_time ?? ""}
-                  onChange={(event) => setModal({ ...modal, item: { ...modal.item, start_time: event.target.value } })}
+                  value={settings.quiet_hours_start}
+                  onChange={(event) => setSettings({ ...settings, quiet_hours_start: event.target.value })}
+                  className="rounded-lg border border-slate-700 bg-white px-3 py-2"
                 />
               </label>
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Type</span>
-                  <select
-                    value={modal.item.type}
-                    onChange={(event) =>
-                      setModal({ ...modal, item: { ...modal.item, type: event.target.value as ScheduleItem["type"] } })
-                    }
-                  >
-                    <option value="task">Task</option>
-                    <option value="event">Event</option>
-                    <option value="reminder">Reminder</option>
-                  </select>
-                </label>
-              )}
-              {modal.mode === "edit" && (
-                <label className="field">
-                  <span>Priority</span>
-                  <input
-                    type="number"
-                    value={modal.item.priority}
-                    onChange={(event) =>
-                      setModal({ ...modal, item: { ...modal.item, priority: Number(event.target.value) } })
-                    }
-                  />
-                </label>
-              )}
+              <label className="flex flex-col gap-2 text-sm">
+                Quiet hours end
+                <input
+                  type="time"
+                  value={settings.quiet_hours_end}
+                  onChange={(event) => setSettings({ ...settings, quiet_hours_end: event.target.value })}
+                  className="rounded-lg border border-slate-700 bg-white px-3 py-2"
+                />
+              </label>
+              <label className="flex flex-col gap-2 text-sm">
+                Lead time (minutes)
+                <input
+                  type="number"
+                  value={settings.lead_time_min}
+                  onChange={(event) => setSettings({ ...settings, lead_time_min: Number(event.target.value) })}
+                  className="rounded-lg border border-slate-700 bg-white px-3 py-2"
+                />
+              </label>
             </div>
-            <div className="actions">
-              <button
-                onClick={async () => {
-                  if (!modal.item.id) return;
-                  await api.updateTask(modal.item.id, {
-                    title: modal.item.title,
-                    date: modal.item.date,
-                    start_time: modal.item.start_time,
-                    type: modal.item.type,
-                    priority: modal.item.priority,
-                  });
-                  await loadTasks();
-                  setModal(null);
-                }}
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            <button
+              onClick={() => settings && api.updateSettings(settings).then(setSettings)}
+              className="mt-6 rounded-full bg-indigo-500 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Save policy
+            </button>
+          </section>
+        )}
 
-      {error && <p className="error">{error}</p>}
-      {loading && <p className="muted">Working...</p>}
+        {activeTab === "Insights" && insights && (
+          <section className="grid gap-6 lg:grid-cols-2">
+            <Panel title="Notifications per day">
+              <div className="h-60">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={insights.notifications_per_day}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                    <XAxis dataKey="date" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Line type="monotone" dataKey="count" stroke="#6366f1" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </Panel>
+            <Panel title="Completions per day">
+              <div className="h-60">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={insights.completions_per_day}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                    <XAxis dataKey="date" stroke="#94a3b8" />
+                    <YAxis stroke="#94a3b8" />
+                    <Tooltip />
+                    <Bar dataKey="count" fill="#22c55e" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Panel>
+            <Panel title="Performance">
+              <div className="space-y-2 text-sm text-slate-300">
+                <p>Missed rate proxy: {(insights.missed_rate_proxy * 100).toFixed(0)}%</p>
+                <p>Notifications per completion: {insights.notifications_per_completion.toFixed(2)}</p>
+                <p>Total notifications: {insights.totals.notifications ?? 0}</p>
+                <p>Total completions: {insights.totals.completions ?? 0}</p>
+              </div>
+            </Panel>
+          </section>
+        )}
+      </div>
     </div>
   );
 }
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl bg-slate-900/70 p-6 shadow">
+      <h3 className="text-lg font-semibold">{title}</h3>
+      <div className="mt-4">{children}</div>
+    </div>
+  );
+}
+
+function ActionButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="rounded-full bg-slate-700 px-3 py-1 text-xs font-semibold text-slate-100 hover:bg-slate-600"
+    >
+      {label}
+    </button>
+  );
+}
+
+export default App;

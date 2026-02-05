@@ -1,24 +1,71 @@
-# Plangraph MVP (Infomatrix Gold)
+# Plangraph (Life OS)
 
-A local-first full-stack app that parses natural-language plans with Ollama, builds an explainable schedule, and runs a reminder + habit engine on top of SQLite persistence.
+Plangraph is a local-first planning assistant that parses plans into tasks, schedules reminders, and helps you act on the next best step. All user data is stored in SQLite on your machine. The LLM is only used for plan parsing and the short "why now" explanation, and it is fully configurable through environment variables.
 
-## Prerequisites
+## Tech stack
 
-- Python 3.12
-- Node.js 18+
-- Ollama running locally at `http://localhost:11434` with the `llama3.1:8b` model
+- **Backend:** Python 3.11+, FastAPI, SQLAlchemy, SQLite
+- **Frontend:** React + Vite + TypeScript + Tailwind CSS
+- **Charts:** Recharts
+- **Scheduler:** in-process loop checks reminders every 30–60s
+- **Notifications:** Browser Notifications API (works while the app tab is open)
 
-## Run backend
+> **Notification limitation:** Because the app uses the browser Notifications API, reminders will only appear while the web app is open in your browser. The backend does not push system-level notifications.
+
+## Monorepo layout
+
+```
+backend/   FastAPI app, scheduler, LLM client, deterministic parser
+frontend/  Vite + React UI
+```
+
+## Backend setup
 
 ```bash
 cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+cp .env.example .env
+uvicorn main:app --reload
 ```
 
-## Run frontend
+### LLM configuration
+
+By default, the backend uses a local OpenAI-compatible endpoint (e.g., Ollama):
+
+```bash
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=llama3.1
+USE_LLM=true
+```
+
+To point at any OpenAI-compatible endpoint, change the base URL, API key, and model:
+
+```bash
+LLM_BASE_URL=https://your-host.example/v1
+LLM_API_KEY=your-key
+LLM_MODEL=your-model-name
+```
+
+If LLM output is invalid JSON or fails validation, Plangraph automatically falls back to a deterministic parser.
+
+### Optional seed data
+
+Enable seed data for local demos:
+
+```bash
+DEV_SEED=true
+```
+
+Then call:
+
+```bash
+curl -X POST http://localhost:8000/seed
+```
+
+## Frontend setup
 
 ```bash
 cd frontend
@@ -26,12 +73,19 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` to use the app. The UI is organized into Now, Tasks, and Add screens.
+By default, the frontend expects the backend at `http://localhost:8000`. To override:
 
-## How reminders work
+```bash
+VITE_API_URL=http://localhost:8000
+```
 
-- **Event reminders** are created for each planned item with a start time (lead times by type).
-- **Contextual reminders** attach untimed reminders to the earliest anchor event.
-- **Habit reminders** learn from completions and schedule around the median completion time.
+## Key endpoints
 
-The planner is deterministic and explainable. The LLM is only used for parsing text into structured items.
+- `POST /parse` — parse freeform plan text into tasks (LLM or fallback)
+- `GET/POST /tasks` — list or create tasks
+- `PATCH /tasks/{id}` — update tasks
+- `GET/POST /settings` — reminder policy settings
+- `GET /now` — next best action, upcoming tasks, and “why now”
+- `POST /reminders/{id}/action` — done, snooze, dismiss
+- `GET /insights` — aggregated metrics and time series
+- `POST /seed` — dev seed data (if enabled)
