@@ -1,12 +1,44 @@
-# Plangraph MVP (Infomatrix Gold)
+# Plangraph (Life OS)
 
-A local-first full-stack app that parses natural-language plans with Ollama, builds an explainable schedule, and runs a reminder + habit engine on top of SQLite persistence.
+Plangraph is a local-first Life OS that parses natural-language plans into reminders, runs a lightweight scheduling policy, and surfaces a calm “next best action” flow. All data is stored in SQLite and the UI uses the browser Notifications API (only while the tab is open).
+
+## File tree
+
+```
+plangraph-mvp/
+├── backend/
+│   ├── .env.example
+│   ├── README.md
+│   ├── __init__.py
+│   ├── database.py
+│   ├── llm_client.py
+│   ├── main.py
+│   ├── models.py
+│   ├── parser.py
+│   ├── policy.py
+│   ├── requirements.txt
+│   ├── scheduler.py
+│   └── schemas.py
+├── frontend/
+│   ├── index.html
+│   ├── package.json
+│   ├── postcss.config.cjs
+│   ├── tailwind.config.cjs
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   └── src/
+│       ├── App.tsx
+│       ├── api.ts
+│       ├── index.css
+│       ├── main.tsx
+│       └── types.ts
+└── README.md
+```
 
 ## Prerequisites
 
-- Python 3.12
+- Python 3.11+
 - Node.js 18+
-- Ollama running locally at `http://localhost:11434` with the `llama3.1:8b` model
 
 ## Run backend
 
@@ -26,12 +58,56 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` to use the app. The UI is organized into Now, Tasks, and Add screens.
+Open `http://localhost:5173`.
 
-## How reminders work
+## Environment configuration
 
-- **Event reminders** are created for each planned item with a start time (lead times by type).
-- **Contextual reminders** attach untimed reminders to the earliest anchor event.
-- **Habit reminders** learn from completions and schedule around the median completion time.
+### Defaults (local LLM)
 
-The planner is deterministic and explainable. The LLM is only used for parsing text into structured items.
+The backend defaults to a local OpenAI-compatible endpoint such as Ollama:
+
+```
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=llama3.1
+USE_LLM=true
+DATABASE_URL=sqlite:///./plangraph.db
+APP_ENV=dev
+```
+
+### OpenAI-compatible endpoint
+
+```
+LLM_BASE_URL=https://your-endpoint/v1
+LLM_API_KEY=your_api_key
+LLM_MODEL=your_model_name
+USE_LLM=true
+```
+
+## Notes
+
+- The LLM is used only for plan parsing and short “why now” explanations. If the model returns invalid JSON, the backend falls back to the deterministic parser.
+- Notifications use the browser Notifications API and only fire while the app is open (no background push support).
+- Voice dictation relies on the browser Web Speech API and is best supported in Chromium-based browsers; it may be unavailable in Firefox or privacy-hardened environments.
+
+## Parsing format (spaced schedules)
+
+You can paste time blocks on their own lines, followed by the description on the next line(s):
+
+```
+06:30 - 07:30
+Morning review + stretch
+
+18:00 - 19:00
+Project work block
+```
+
+The parser treats each time range as a flexible window and attaches the following non-empty lines until the next time range.
+
+## Development seed
+
+Enable dev seeding with `APP_ENV=dev`, then:
+
+```bash
+curl -X POST http://localhost:8000/seed
+```
