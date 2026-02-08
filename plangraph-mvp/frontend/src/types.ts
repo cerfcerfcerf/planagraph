@@ -21,7 +21,7 @@ export type Task = {
   window_start: string | null;
   window_end: string | null;
   priority: "low" | "med" | "high";
-  task_type: "routine" | "appointment" | "study" | "exercise" | "other";
+  task_type: "meal" | "sleep" | "medication" | "hygiene" | "class" | "exercise" | "other";
   status: "active" | "completed" | "archived";
   recurrence: string | null;
   recurrence_detail: string | null;
@@ -43,6 +43,12 @@ export type Reminder = {
   scheduled_for: string;
   state: string;
   title?: string | null;
+  why_now?: WhyNow | null;
+};
+
+export type WhyNow = {
+  reasons: string[];
+  score: number;
 };
 
 export type NowAction = {
@@ -53,7 +59,7 @@ export type NowAction = {
   window_start: string | null;
   window_end: string | null;
   priority: string;
-  why_now: string;
+  why_now: WhyNow;
 };
 
 export type NowResponse = {
@@ -67,6 +73,8 @@ export type InsightsResponse = {
   completions_per_day: { date: string; value: number }[];
   missed_rate_proxy: { date: string; value: number }[];
   notifications_per_completion: { date: string; value: number }[];
+  stale_reminder_rate: { date: string; value: number }[];
+  median_completion_delay: { date: string; value: number }[];
 };
 
 export type InsightsSummary = {
@@ -77,6 +85,8 @@ export type InsightsSummary = {
     notifications_per_day: number;
     notifications_per_completion: number;
     missed_rate_proxy: number;
+    stale_reminder_rate: number;
+    median_completion_delay: number;
   };
 };
 
@@ -84,7 +94,7 @@ export type Template = {
   id: number;
   title: string;
   default_duration_min: number;
-  default_type: "routine" | "appointment" | "study" | "exercise" | "other";
+  default_type: "meal" | "sleep" | "medication" | "hygiene" | "class" | "exercise" | "other";
   default_priority: "low" | "med" | "high";
   pinned: boolean;
   used_count: number;
@@ -94,7 +104,7 @@ export type Template = {
 export type TemplateCreate = {
   title: string;
   default_duration_min?: number;
-  default_type?: "routine" | "appointment" | "study" | "exercise" | "other";
+  default_type?: "meal" | "sleep" | "medication" | "hygiene" | "class" | "exercise" | "other";
   default_priority?: "low" | "med" | "high";
   pinned?: boolean;
 };

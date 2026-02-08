@@ -14,7 +14,6 @@ import {
   reminderAction,
   updateSettings,
   updateTask,
-  useTemplate,
 } from "./api";
 import type {
   InsightsResponse,
@@ -24,6 +23,7 @@ import type {
   Settings,
   Task,
   Template,
+  WhyNow,
 } from "./types";
 import {
   Area,
@@ -101,6 +101,10 @@ export default function App() {
   const [lazyTask, setLazyTask] = useState<Task | null>(null);
   const [lazySuggestion, setLazySuggestion] = useState<string[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [quickAddDraft, setQuickAddDraft] = useState<ParseItem | null>(null);
+  const [quickAddSource, setQuickAddSource] = useState<{ type: "template" | "recent"; id: number } | null>(
+    null
+  );
   const notifiedIds = useRef(new Set<number>());
 
   const refreshTasks = () => listTasks().then((data) => setTasks(data.tasks));
@@ -246,6 +250,8 @@ export default function App() {
       setParsedItems(response.items);
       setParseText(quickAddText);
       setQuickAddText("");
+      setQuickAddDraft(null);
+      setQuickAddSource(null);
       setQuickAddOpen(false);
       setPage("Add");
     } finally {
@@ -318,29 +324,66 @@ export default function App() {
     refreshTemplates();
   }
 
-  async function handleUseTemplate(template: Template) {
-    await useTemplate(template.id);
-    refreshTasks();
-    refreshNow();
-  }
-
-  async function handleUseRecent(task: Task) {
+  function buildDraftWindow(durationMinutes = 30) {
     const nowDate = new Date();
     const start = new Date(nowDate.getTime() + 60 * 60000);
-    const end = new Date(start.getTime() + 30 * 60000);
-    await createTasks([
-      {
-        title: task.title,
-        notes: task.notes,
-        due_at: null,
-        window_start: start.toISOString(),
-        window_end: end.toISOString(),
-        priority: task.priority,
-        recurrence: task.recurrence,
-        recurrence_detail: task.recurrence_detail,
-        task_type: task.task_type,
-      },
-    ]);
+    const end = new Date(start.getTime() + durationMinutes * 60000);
+    return { start, end };
+  }
+
+  function selectTemplateDraft(template: Template) {
+    const { start, end } = buildDraftWindow(template.default_duration_min);
+    setQuickAddDraft({
+      title: template.title,
+      date: start.toISOString().slice(0, 10),
+      due_time: null,
+      window_start: start.toISOString(),
+      window_end: end.toISOString(),
+      priority: template.default_priority,
+      recurrence: "none",
+      recurrence_detail: null,
+      confidence: 0.6,
+      notes: null,
+      task_type: template.default_type,
+    });
+    setQuickAddSource({ type: "template", id: template.id });
+  }
+
+  function selectRecentDraft(task: Task) {
+    const { start, end } = buildDraftWindow(30);
+    setQuickAddDraft({
+      title: task.title,
+      date: start.toISOString().slice(0, 10),
+      due_time: null,
+      window_start: start.toISOString(),
+      window_end: end.toISOString(),
+      priority: task.priority,
+      recurrence: task.recurrence ? (task.recurrence as ParseItem["recurrence"]) : "none",
+      recurrence_detail: task.recurrence_detail,
+      confidence: 0.6,
+      notes: task.notes,
+      task_type: task.task_type,
+    });
+    setQuickAddSource({ type: "recent", id: task.id });
+  }
+
+  async function handleQuickAddConfirm() {
+    if (!quickAddDraft) return;
+    const payload = {
+      title: quickAddDraft.title,
+      notes: quickAddDraft.notes ?? null,
+      due_at: combineDateTime(quickAddDraft.date, quickAddDraft.due_time),
+      window_start: quickAddDraft.window_start,
+      window_end: quickAddDraft.window_end,
+      priority: quickAddDraft.priority,
+      recurrence: quickAddDraft.recurrence === "none" ? null : quickAddDraft.recurrence,
+      recurrence_detail: quickAddDraft.recurrence_detail,
+      task_type: quickAddDraft.task_type ?? "other",
+    };
+    await createTasks([payload]);
+    setQuickAddDraft(null);
+    setQuickAddSource(null);
+    setQuickAddOpen(false);
     refreshTasks();
     refreshNow();
   }
@@ -472,6 +515,11 @@ export default function App() {
     },
   ] as const;
 
+  function formatWhyNow(whyNow?: WhyNow | null) {
+    if (!whyNow?.reasons?.length) return null;
+    return whyNow.reasons.join(" · ");
+  }
+
   return (
     <div className="min-h-screen">
       <header className="bg-white shadow-sm">
@@ -520,7 +568,9 @@ export default function App() {
                           ? formatReminderTime(now.next_best_action.scheduled_for)
                           : "Flexible window"}
                       </p>
-                      <p className="mt-2 text-sm text-slate">{now.next_best_action.why_now}</p>
+                      <p className="mt-2 text-sm text-slate">
+                        {formatWhyNow(now.next_best_action.why_now)}
+                      </p>
                     </div>
                     <div className="flex flex-wrap gap-3">
                       <button
@@ -565,6 +615,9 @@ export default function App() {
                       >
                         <p className="text-sm text-slate">{item.title ?? "Task"}</p>
                         <p className="font-medium">{formatReminderTime(item.scheduled_for)}</p>
+                        {formatWhyNow(item.why_now) && (
+                          <p className="mt-1 text-xs text-slate">{formatWhyNow(item.why_now)}</p>
+                        )}
                       </li>
                     ))
                   ) : (
@@ -589,6 +642,9 @@ export default function App() {
                       <div key={item.id} className="rounded-2xl border border-slate/10 p-4">
                         <p className="text-sm text-slate">{item.title ?? "Task"}</p>
                         <p className="font-medium">{formatReminderTime(item.scheduled_for)}</p>
+                        {formatWhyNow(item.why_now) && (
+                          <p className="mt-1 text-xs text-slate">{formatWhyNow(item.why_now)}</p>
+                        )}
                       </div>
                     ))
                   ) : (
@@ -1060,7 +1116,11 @@ export default function App() {
               <h3 className="text-lg font-semibold">Quick add</h3>
               <button
                 className="rounded-full border border-slate/20 px-3 py-1 text-xs"
-                onClick={() => setQuickAddOpen(false)}
+                onClick={() => {
+                  setQuickAddOpen(false);
+                  setQuickAddDraft(null);
+                  setQuickAddSource(null);
+                }}
               >
                 Close
               </button>
@@ -1070,18 +1130,23 @@ export default function App() {
             </p>
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               {templates.length ? (
-                templates.map((template) => (
-                  <button
-                    key={template.id}
-                    className="rounded-2xl border border-slate/10 p-3 text-left"
-                    onClick={() => handleUseTemplate(template)}
-                  >
-                    <p className="text-sm font-semibold">{template.title}</p>
-                    <p className="text-xs text-slate">
-                      {template.default_duration_min} min • {template.default_priority}
-                    </p>
-                  </button>
-                ))
+                templates.map((template) => {
+                  const selected = quickAddSource?.type === "template" && quickAddSource.id === template.id;
+                  return (
+                    <button
+                      key={template.id}
+                      className={`rounded-2xl border p-3 text-left ${
+                        selected ? "border-emerald-400 bg-emerald-50" : "border-slate/10"
+                      }`}
+                      onClick={() => selectTemplateDraft(template)}
+                    >
+                      <p className="text-sm font-semibold">{template.title}</p>
+                      <p className="text-xs text-slate">
+                        {template.default_duration_min} min • {template.default_priority}
+                      </p>
+                    </button>
+                  );
+                })
               ) : (
                 <p className="text-sm text-slate">No templates yet. Save one from a task.</p>
               )}
@@ -1089,18 +1154,107 @@ export default function App() {
             <div className="mt-4">
               <p className="text-xs uppercase text-slate">Recent tasks</p>
               <div className="mt-2 grid gap-2 md:grid-cols-2">
-                {tasks.slice(0, 4).map((task) => (
-                  <button
-                    key={task.id}
-                    className="rounded-2xl border border-slate/10 p-3 text-left"
-                    onClick={() => handleUseRecent(task)}
-                  >
-                    <p className="text-sm font-semibold">{task.title}</p>
-                    <p className="text-xs text-slate">{formatTaskTime(task)}</p>
-                  </button>
-                ))}
+                {tasks.slice(0, 4).map((task) => {
+                  const selected = quickAddSource?.type === "recent" && quickAddSource.id === task.id;
+                  return (
+                    <button
+                      key={task.id}
+                      className={`rounded-2xl border p-3 text-left ${
+                        selected ? "border-emerald-400 bg-emerald-50" : "border-slate/10"
+                      }`}
+                      onClick={() => selectRecentDraft(task)}
+                    >
+                      <p className="text-sm font-semibold">{task.title}</p>
+                      <p className="text-xs text-slate">{formatTaskTime(task)}</p>
+                    </button>
+                  );
+                })}
               </div>
             </div>
+            {quickAddDraft && (
+              <div className="mt-4 rounded-2xl border border-slate/10 bg-mist p-4">
+                <p className="text-xs uppercase text-slate">Selected draft</p>
+                <input
+                  className="mt-2 w-full rounded-lg border border-slate/20 p-2 text-sm"
+                  value={quickAddDraft.title}
+                  onChange={(event) =>
+                    setQuickAddDraft((draft) => (draft ? { ...draft, title: event.target.value } : draft))
+                  }
+                />
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <input
+                    className="rounded-lg border border-slate/20 p-2 text-sm"
+                    type="date"
+                    value={quickAddDraft.date ?? quickAddDraft.window_start?.slice(0, 10) ?? ""}
+                    onChange={(event) =>
+                      setQuickAddDraft((draft) => (draft ? updateWindowDate(draft, event.target.value) : draft))
+                    }
+                  />
+                  {quickAddDraft.window_start && quickAddDraft.window_end ? (
+                    <div className="flex gap-2">
+                      <input
+                        className="w-full rounded-lg border border-slate/20 p-2 text-sm"
+                        type="time"
+                        value={format(parseISO(quickAddDraft.window_start), "HH:mm")}
+                        onChange={(event) => {
+                          setQuickAddDraft((draft) => {
+                            if (!draft || !draft.window_end) return draft;
+                            const endTime = format(parseISO(draft.window_end), "HH:mm");
+                            return updateWindowTimes(draft, event.target.value, endTime);
+                          });
+                        }}
+                      />
+                      <input
+                        className="w-full rounded-lg border border-slate/20 p-2 text-sm"
+                        type="time"
+                        value={format(parseISO(quickAddDraft.window_end), "HH:mm")}
+                        onChange={(event) => {
+                          setQuickAddDraft((draft) => {
+                            if (!draft || !draft.window_start) return draft;
+                            const startTime = format(parseISO(draft.window_start), "HH:mm");
+                            return updateWindowTimes(draft, startTime, event.target.value);
+                          });
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      className="rounded-lg border border-slate/20 p-2 text-sm"
+                      type="time"
+                      value={quickAddDraft.due_time ?? ""}
+                      onChange={(event) =>
+                        setQuickAddDraft((draft) =>
+                          draft ? { ...draft, due_time: event.target.value } : draft
+                        )
+                      }
+                    />
+                  )}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  <select
+                    className="rounded-lg border border-slate/20 p-2 text-sm"
+                    value={quickAddDraft.priority}
+                    onChange={(event) =>
+                      setQuickAddDraft((draft) =>
+                        draft
+                          ? { ...draft, priority: event.target.value as ParseItem["priority"] }
+                          : draft
+                      )
+                    }
+                  >
+                    <option value="low">Low</option>
+                    <option value="med">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                  <button
+                    className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                    onClick={handleQuickAddConfirm}
+                  >
+                    Add task
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="mt-4">
               <p className="text-xs uppercase text-slate">Or dictate</p>
               <textarea

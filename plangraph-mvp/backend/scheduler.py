@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Event, Reminder
-from policy import get_settings, roll_task_forward, schedule_reminder, schedule_upcoming_reminders, should_fire
+from policy import (
+    get_settings,
+    is_actionable_now,
+    is_occurrence_expired,
+    roll_task_forward,
+    schedule_reminder,
+    schedule_upcoming_reminders,
+    should_fire,
+)
 from models import Task
 
 
@@ -44,35 +52,21 @@ class ReminderScheduler:
                 task = session.get(Task, reminder.task_id)
                 if not task:
                     continue
-                if not should_fire(reminder, task, now, settings):
-                    if task.window_end and now > task.window_end:
-                        reminder.state = "expired"
-                        session.add(
-                            Event(
-                                type="reminder_expired",
-                                task_id=task.id,
-                                reminder_id=reminder.id,
-                                ts=now,
-                                payload_json=None,
-                            )
+                if reminder.scheduled_for <= now and not is_actionable_now(task, now, settings):
+                    reminder.state = "expired"
+                    session.add(
+                        Event(
+                            type="reminder_expired",
+                            task_id=task.id,
+                            reminder_id=reminder.id,
+                            ts=now,
+                            payload_json=None,
                         )
-                        if roll_task_forward(task):
-                            schedule_reminder(session, task)
-                    elif task.due_at and now > task.due_at + timedelta(minutes=30):
-                        reminder.state = "expired"
-                        session.add(
-                            Event(
-                                type="reminder_expired",
-                                task_id=task.id,
-                                reminder_id=reminder.id,
-                                ts=now,
-                                payload_json=None,
-                            )
-                        )
-                        if roll_task_forward(task):
-                            schedule_reminder(session, task)
+                    )
+                    if is_occurrence_expired(task, now, settings) and roll_task_forward(task):
+                        schedule_reminder(session, task)
                     continue
-                if reminder.scheduled_for <= now:
+                if should_fire(reminder, task, now, settings):
                     reminder.state = "sent"
                     session.add(
                         Event(
@@ -83,6 +77,19 @@ class ReminderScheduler:
                             payload_json=None,
                         )
                     )
+                elif is_occurrence_expired(task, now, settings):
+                    reminder.state = "expired"
+                    session.add(
+                        Event(
+                            type="reminder_expired",
+                            task_id=task.id,
+                            reminder_id=reminder.id,
+                            ts=now,
+                            payload_json=None,
+                        )
+                    )
+                    if roll_task_forward(task):
+                        schedule_reminder(session, task)
             schedule_upcoming_reminders(session, now)
             session.commit()
         finally:

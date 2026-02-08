@@ -6,9 +6,10 @@ from typing import Any
 
 import httpx
 
-DEFAULT_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
-DEFAULT_API_KEY = os.getenv("LLM_API_KEY", "ollama")
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3.1")
+DEFAULT_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+DEFAULT_API_KEY = os.getenv("OPENAI_API_KEY", "")
+DEFAULT_MODEL_FAST = os.getenv("OPENAI_MODEL_FAST", "gpt-5-mini")
+DEFAULT_MODEL_REASON = os.getenv("OPENAI_MODEL_REASON", "gpt-5.2")
 
 
 class LLMClient:
@@ -17,12 +18,14 @@ class LLMClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        model_reason: str | None = None,
         timeout: float | None = None,
         retries: int | None = None,
     ) -> None:
         self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self.api_key = api_key or DEFAULT_API_KEY
-        self.model = model or DEFAULT_MODEL
+        self.model = model or DEFAULT_MODEL_FAST
+        self.model_reason = model_reason or DEFAULT_MODEL_REASON
         self.timeout = timeout or float(os.getenv("LLM_TIMEOUT", "12"))
         self.retries = retries or int(os.getenv("LLM_MAX_RETRIES", "2"))
 
@@ -41,7 +44,7 @@ class LLMClient:
                 continue
         raise RuntimeError(f"LLM request failed: {last_error}")
 
-    def parse_plan(self, text: str, schema_hint: str) -> dict[str, Any]:
+    def parse_plan(self, text: str, schema: dict[str, Any]) -> dict[str, Any]:
         payload = {
             "model": self.model,
             "messages": [
@@ -49,38 +52,19 @@ class LLMClient:
                     "role": "system",
                     "content": (
                         "You are a strict JSON generator. Respond only with JSON that "
-                        f"matches this schema: {schema_hint}"
+                        "matches the provided schema."
                     ),
                 },
                 {"role": "user", "content": text},
             ],
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
+            "response_format": {"type": "json_schema", "json_schema": schema},
         }
         return self._post(payload)
 
-    def why_now(self, prompt: str) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Provide a short, calm reason (one sentence) for why this "
-                        "task should be done now."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.4,
-        }
-        data = self._post(payload)
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return content.strip()
-
     def summarize_insights(self, metrics: dict[str, float]) -> dict[str, Any]:
         payload = {
-            "model": self.model,
+            "model": self.model_reason,
             "messages": [
                 {
                     "role": "system",
@@ -102,7 +86,7 @@ class LLMClient:
 
     def lazy_suggestions(self, title: str, notes: str | None = None) -> dict[str, Any]:
         payload = {
-            "model": self.model,
+            "model": self.model_reason,
             "messages": [
                 {
                     "role": "system",

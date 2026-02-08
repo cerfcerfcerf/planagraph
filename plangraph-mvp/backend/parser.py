@@ -81,41 +81,33 @@ def infer_priority(title: str, notes: str | None = None) -> str:
     return "med"
 
 
-def infer_task_type(title: str) -> str:
-    lowered = title.lower()
-    if any(
-        keyword in lowered
-        for keyword in [
-            "meal",
-            "breakfast",
-            "lunch",
-            "dinner",
-            "sleep",
-            "wake",
-            "hygiene",
-            "shower",
-            "medication",
-        ]
-    ):
-        return "routine"
-    if any(keyword in lowered for keyword in ["doctor", "dentist", "meeting", "flight", "appointment"]):
-        return "appointment"
-    if any(keyword in lowered for keyword in ["study", "class", "lecture", "lab", "homework"]):
-        return "study"
-    if any(keyword in lowered for keyword in ["exercise", "gym", "workout", "run", "yoga"]):
+def infer_task_type(title: str, notes: str | None = None) -> str:
+    lowered = f"{title} {notes or ''}".lower()
+    if any(keyword in lowered for keyword in ["breakfast", "lunch", "dinner", "eat", "meal prep", "meal"]):
+        return "meal"
+    if any(keyword in lowered for keyword in ["sleep", "wake up", "wakeup", "bed"]):
+        return "sleep"
+    if any(keyword in lowered for keyword in ["pills", "meds", "vitamins", "medication"]):
+        return "medication"
+    if any(keyword in lowered for keyword in ["shower", "brush", "teeth", "hygiene"]):
+        return "hygiene"
+    if any(keyword in lowered for keyword in ["lecture", "class", "lab", "seminar"]):
+        return "class"
+    if any(keyword in lowered for keyword in ["gym", "workout", "run", "exercise"]):
         return "exercise"
     return "other"
 
 
-def recurrence_suggestions(title: str) -> list[dict]:
+def recurrence_suggestions(title: str, detected_date: date | None = None) -> list[dict]:
     lowered = title.lower()
     suggestions: list[dict] = []
-    if any(keyword in lowered for keyword in ["class", "lecture", "lab", "gym"]):
+    if detected_date and any(keyword in lowered for keyword in ["class", "lecture", "lab"]):
+        weekday = detected_date.strftime("%A").lower()
         suggestions.append(
             {
                 "recurrence": "weekly",
-                "recurrence_detail": "weekdays",
-                "confidence": 0.6,
+                "recurrence_detail": weekday,
+                "confidence": 0.7,
             }
         )
     return suggestions
@@ -162,12 +154,12 @@ def deterministic_parse(text: str) -> list[ParseItem]:
         notes = " ".join(buffer[1:]).strip() if len(buffer) > 1 else None
         detected_date = _extract_date(description, today) or today
         recurrence, recurrence_detail = _extract_recurrence(description)
-        task_type = infer_task_type(title)
+        task_type = infer_task_type(title, notes)
         priority = infer_priority(title, notes)
-        suggestions = recurrence_suggestions(title)
-        if task_type == "routine" and recurrence == "none":
+        suggestions = recurrence_suggestions(title, detected_date)
+        if task_type in {"meal", "sleep", "medication", "hygiene"} and recurrence == "none":
             recurrence = "daily"
-            recurrence_detail = "routine"
+            recurrence_detail = "auto-routine"
         if current_range:
             start, end = current_range
             end_date = detected_date

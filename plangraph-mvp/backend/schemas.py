@@ -36,7 +36,15 @@ class TaskBase(BaseModel):
     window_start: datetime | None = None
     window_end: datetime | None = None
     priority: Literal["low", "med", "high"] = "med"
-    task_type: Literal["routine", "appointment", "study", "exercise", "other"] = "other"
+    task_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] = "other"
     recurrence: str | None = None
     recurrence_detail: str | None = None
 
@@ -52,7 +60,15 @@ class TaskUpdate(BaseModel):
     window_start: datetime | None = None
     window_end: datetime | None = None
     priority: Literal["low", "med", "high"] | None = None
-    task_type: Literal["routine", "appointment", "study", "exercise", "other"] | None = None
+    task_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] | None = None
     status: Literal["active", "completed", "archived"] | None = None
     recurrence: str | None = None
     recurrence_detail: str | None = None
@@ -89,6 +105,11 @@ class SettingsUpdate(BaseModel):
     lead_time_minutes: int | None = None
 
 
+class WhyNow(BaseModel):
+    reasons: list[str]
+    score: float
+
+
 class ReminderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,6 +118,7 @@ class ReminderOut(BaseModel):
     scheduled_for: datetime
     state: str
     title: str | None = None
+    why_now: WhyNow | None = None
 
 
 class NowAction(BaseModel):
@@ -107,7 +129,7 @@ class NowAction(BaseModel):
     window_start: datetime | None
     window_end: datetime | None
     priority: str
-    why_now: str
+    why_now: WhyNow
 
 
 class NowResponse(BaseModel):
@@ -130,6 +152,8 @@ class InsightsResponse(BaseModel):
     completions_per_day: list[dict]
     missed_rate_proxy: list[dict]
     notifications_per_completion: list[dict]
+    stale_reminder_rate: list[dict]
+    median_completion_delay: list[dict]
 
 
 class InsightsSummaryResponse(BaseModel):
@@ -150,7 +174,15 @@ class LazySuggestionResponse(BaseModel):
 class TemplateCreate(BaseModel):
     title: str
     default_duration_min: int = 30
-    default_type: Literal["routine", "appointment", "study", "exercise", "other"] = "other"
+    default_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] = "other"
     default_priority: Literal["low", "med", "high"] = "med"
     pinned: bool = False
 
