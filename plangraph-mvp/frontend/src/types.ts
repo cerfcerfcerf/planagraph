@@ -62,10 +62,20 @@ export type NowAction = {
   why_now: WhyNow;
 };
 
+export type UpcomingTask = {
+  task_id: number;
+  title: string;
+  scheduled_for: string | null;
+  window_start: string | null;
+  window_end: string | null;
+  priority: string;
+  why_now: WhyNow;
+};
+
 export type NowResponse = {
   next_best_action: NowAction | null;
-  next_6_hours: Reminder[];
-  later_today: Reminder[];
+  next_6_hours: UpcomingTask[];
+  later_today: UpcomingTask[];
 };
 
 export type InsightsResponse = {

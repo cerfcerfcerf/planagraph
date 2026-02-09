@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -45,7 +45,7 @@ class ReminderScheduler:
     def _process_due_reminders(self) -> None:
         session: Session = SessionLocal()
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             settings = get_settings(session)
             scheduled = session.query(Reminder).filter(Reminder.state == "scheduled").all()
             for reminder in scheduled:

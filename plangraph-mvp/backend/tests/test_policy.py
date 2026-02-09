@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from models import Settings, Task
 from policy import is_actionable_now, roll_task_forward, urgency_score
@@ -6,30 +6,48 @@ from policy import is_actionable_now, roll_task_forward, urgency_score
 
 def test_actionability_gating_window_and_due() -> None:
     settings = Settings(lead_time_minutes=20)
-    window_start = datetime(2024, 1, 1, 10, 0)
-    window_end = datetime(2024, 1, 1, 11, 0)
+    window_start = datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+    window_end = datetime(2024, 1, 1, 11, 0, tzinfo=timezone.utc)
     task = Task(status="active", window_start=window_start, window_end=window_end)
 
-    assert not is_actionable_now(task, datetime(2024, 1, 1, 9, 30), settings)
-    assert is_actionable_now(task, datetime(2024, 1, 1, 9, 45), settings)
-    assert not is_actionable_now(task, datetime(2024, 1, 1, 11, 1), settings)
+    assert not is_actionable_now(
+        task, datetime(2024, 1, 1, 9, 30, tzinfo=timezone.utc), settings
+    )
+    assert is_actionable_now(
+        task, datetime(2024, 1, 1, 9, 45, tzinfo=timezone.utc), settings
+    )
+    assert not is_actionable_now(
+        task, datetime(2024, 1, 1, 11, 1, tzinfo=timezone.utc), settings
+    )
 
-    due_task = Task(status="active", due_at=datetime(2024, 1, 1, 10, 0))
-    assert not is_actionable_now(due_task, datetime(2024, 1, 1, 9, 39), settings)
-    assert is_actionable_now(due_task, datetime(2024, 1, 1, 10, 15), settings)
-    assert not is_actionable_now(due_task, datetime(2024, 1, 1, 10, 31), settings)
+    due_task = Task(
+        status="active", due_at=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+    )
+    assert not is_actionable_now(
+        due_task, datetime(2024, 1, 1, 9, 39, tzinfo=timezone.utc), settings
+    )
+    assert is_actionable_now(
+        due_task, datetime(2024, 1, 1, 10, 15, tzinfo=timezone.utc), settings
+    )
+    assert not is_actionable_now(
+        due_task, datetime(2024, 1, 1, 10, 31, tzinfo=timezone.utc), settings
+    )
 
 
 def test_actionability_no_time_today_only() -> None:
     settings = Settings(lead_time_minutes=15)
-    task = Task(status="active", created_at=datetime(2024, 1, 1, 8, 0))
-    assert is_actionable_now(task, datetime(2024, 1, 1, 12, 0), settings)
-    assert not is_actionable_now(task, datetime(2024, 1, 2, 9, 0), settings)
+    task = Task(status="active", created_at=datetime(2024, 1, 1, 8, 0, tzinfo=timezone.utc))
+    assert is_actionable_now(
+        task, datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc), settings
+    )
+    assert not is_actionable_now(
+        task, datetime(2024, 1, 2, 9, 0, tzinfo=timezone.utc), settings
+    )
 
 
 def test_cross_midnight_window_roll_forward() -> None:
-    start = datetime(2024, 1, 1, 22, 0)
-    end = datetime(2024, 1, 2, 6, 0)
+    start = datetime(2024, 1, 1, 22, 0, tzinfo=timezone.utc)
+    end = datetime(2024, 1, 2, 6, 0, tzinfo=timezone.utc)
     task = Task(
         status="active",
         recurrence="daily",
@@ -42,7 +60,7 @@ def test_cross_midnight_window_roll_forward() -> None:
 
 
 def test_urgency_score_monotonicity() -> None:
-    now = datetime(2024, 1, 1, 9, 0)
+    now = datetime(2024, 1, 1, 9, 0, tzinfo=timezone.utc)
     far_task = Task(
         status="active",
         priority="med",

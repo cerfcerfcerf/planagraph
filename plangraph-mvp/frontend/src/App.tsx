@@ -72,7 +72,8 @@ function formatTaskTime(task: Task) {
   return "Flexible";
 }
 
-function formatReminderTime(value: string) {
+function formatReminderTime(value: string | null) {
+  if (!value) return "Flexible";
   return format(parseISO(value), "EEE, MMM d · HH:mm");
 }
 
@@ -105,6 +106,18 @@ export default function App() {
   const [quickAddSource, setQuickAddSource] = useState<{ type: "template" | "recent"; id: number } | null>(
     null
   );
+  const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
+  const [reminderSubmitting, setReminderSubmitting] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [editDraft, setEditDraft] = useState<{
+    title: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    priority: ParseItem["priority"];
+    recurrence: ParseItem["recurrence"];
+  } | null>(null);
   const notifiedIds = useRef(new Set<number>());
 
   const refreshTasks = () => listTasks().then((data) => setTasks(data.tasks));
@@ -120,6 +133,11 @@ export default function App() {
   const refreshConfig = () => fetchConfig().then((data) => setUseLlm(data.use_llm));
 
   const refreshTemplates = () => fetchTemplates().then(setTemplates);
+
+  function showToast(message: string) {
+    setToastMessage(message);
+    window.setTimeout(() => setToastMessage(null), 4000);
+  }
 
   useEffect(() => {
     refreshTasks();
@@ -207,6 +225,29 @@ export default function App() {
       completed: searched.filter((task) => task.status === "completed"),
     };
   }, [tasks, taskSearch]);
+
+  const recentCards = useMemo(() => {
+    const normalized = (value: string) => value.trim().toLowerCase();
+    const durationForTask = (task: Task) => {
+      if (task.window_start && task.window_end) {
+        const start = parseISO(task.window_start);
+        const end = parseISO(task.window_end);
+        return Math.round((end.getTime() - start.getTime()) / 60000);
+      }
+      return 0;
+    };
+    const seen = new Map<string, { task: Task; count: number }>();
+    tasks.forEach((task) => {
+      const key = `${normalized(task.title)}::${durationForTask(task)}`;
+      const existing = seen.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        seen.set(key, { task, count: 1 });
+      }
+    });
+    return Array.from(seen.values());
+  }, [tasks]);
 
   async function handleParse() {
     setIsParsing(true);
@@ -368,7 +409,7 @@ export default function App() {
   }
 
   async function handleQuickAddConfirm() {
-    if (!quickAddDraft) return;
+    if (!quickAddDraft || quickAddSubmitting) return;
     const payload = {
       title: quickAddDraft.title,
       notes: quickAddDraft.notes ?? null,
@@ -380,12 +421,20 @@ export default function App() {
       recurrence_detail: quickAddDraft.recurrence_detail,
       task_type: quickAddDraft.task_type ?? "other",
     };
-    await createTasks([payload]);
-    setQuickAddDraft(null);
-    setQuickAddSource(null);
-    setQuickAddOpen(false);
-    refreshTasks();
-    refreshNow();
+    try {
+      setQuickAddSubmitting(true);
+      await createTasks([payload]);
+      setQuickAddDraft(null);
+      setQuickAddSource(null);
+      setQuickAddOpen(false);
+      refreshTasks();
+      refreshNow();
+    } catch (error) {
+      showToast("Could not add the task. Please try again.");
+      console.error(error);
+    } finally {
+      setQuickAddSubmitting(false);
+    }
   }
 
   function updateWindowDate(item: ParseItem, dateValue: string) {
@@ -462,16 +511,97 @@ export default function App() {
   }
 
   async function handleReminder(action: string) {
-    if (!now?.next_best_action?.reminder_id) return;
-    await reminderAction(now.next_best_action.reminder_id, action);
-    refreshNow();
-    refreshTasks();
+    if (!now?.next_best_action?.reminder_id) {
+      showToast("No reminder available for this task yet.");
+      return;
+    }
+    if (reminderSubmitting) return;
+    const reminderId = now.next_best_action.reminder_id;
+    const payload = { action };
+    if (import.meta.env.DEV) {
+      console.log("reminderAction request", { reminderId, payload });
+    }
+    try {
+      setReminderSubmitting(true);
+      const response = await reminderAction(reminderId, action);
+      if (import.meta.env.DEV) {
+        console.log("reminderAction response", response);
+      }
+      refreshNow();
+      refreshTasks();
+      refreshInsights();
+    } catch (error) {
+      showToast("Reminder action failed. Please try again.");
+      console.error(error);
+    } finally {
+      setReminderSubmitting(false);
+    }
   }
 
   async function handleStatusToggle(task: Task) {
     const status = task.status === "completed" ? "active" : "completed";
     await updateTask(task.id, { status });
     refreshTasks();
+  }
+
+  function openEditTask(task: Task) {
+    const source = task.due_at ?? task.window_start ?? new Date().toISOString();
+    const dateValue = format(parseISO(source), "yyyy-MM-dd");
+    const startValue = task.due_at
+      ? format(parseISO(task.due_at), "HH:mm")
+      : task.window_start
+        ? format(parseISO(task.window_start), "HH:mm")
+        : "";
+    const endValue = task.window_end ? format(parseISO(task.window_end), "HH:mm") : "";
+    setEditingTask(task);
+    setEditDraft({
+      title: task.title,
+      date: dateValue,
+      startTime: startValue,
+      endTime: endValue,
+      priority: task.priority,
+      recurrence: (task.recurrence as ParseItem["recurrence"]) ?? "none",
+    });
+  }
+
+  async function handleEditSave() {
+    if (!editingTask || !editDraft) return;
+    if (!editDraft.date || !editDraft.startTime) {
+      showToast("Please provide a date and start time.");
+      return;
+    }
+    const start = new Date(`${editDraft.date}T${editDraft.startTime}:00`);
+    let end: Date | null = null;
+    if (editDraft.endTime) {
+      end = new Date(`${editDraft.date}T${editDraft.endTime}:00`);
+      if (end < start) {
+        end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+      }
+    }
+    const payload: Partial<Task> = {
+      title: editDraft.title,
+      priority: editDraft.priority,
+      recurrence: editDraft.recurrence === "none" ? null : editDraft.recurrence,
+    };
+    if (end) {
+      payload.window_start = start.toISOString();
+      payload.window_end = end.toISOString();
+      payload.due_at = null;
+    } else {
+      payload.due_at = start.toISOString();
+      payload.window_start = null;
+      payload.window_end = null;
+    }
+    try {
+      await updateTask(editingTask.id, payload);
+      refreshTasks();
+      refreshNow();
+      setEditingTask(null);
+      setEditDraft(null);
+    } catch (error) {
+      showToast("Could not save changes. Please try again.");
+      console.error(error);
+    }
   }
 
   async function handleSettingsChange(key: keyof Settings, value: string | number) {
@@ -522,6 +652,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
+      {toastMessage && (
+        <div className="fixed right-6 top-6 z-50 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-lg">
+          {toastMessage}
+        </div>
+      )}
       <header className="bg-white shadow-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div>
@@ -574,26 +709,30 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap gap-3">
                       <button
-                        className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                        className="rounded-full bg-ink px-4 py-2 text-sm text-white disabled:opacity-50"
                         onClick={() => handleReminder("done")}
+                        disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
                         Done
                       </button>
                       <button
-                        className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                        className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
                         onClick={() => handleReminder("snooze_10")}
+                        disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
                         Snooze 10
                       </button>
                       <button
-                        className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                        className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
                         onClick={() => handleReminder("snooze_30")}
+                        disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
                         Snooze 30
                       </button>
                       <button
-                        className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                        className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
                         onClick={() => handleReminder("dismiss")}
+                        disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
                         Dismiss
                       </button>
@@ -610,11 +749,13 @@ export default function App() {
                   {now?.next_6_hours.length ? (
                     now.next_6_hours.map((item) => (
                       <li
-                        key={item.id}
+                        key={item.task_id}
                         className="rounded-2xl border border-slate/10 bg-mist p-4"
                       >
                         <p className="text-sm text-slate">{item.title ?? "Task"}</p>
-                        <p className="font-medium">{formatReminderTime(item.scheduled_for)}</p>
+                        <p className="font-medium">
+                          {item.scheduled_for ? formatReminderTime(item.scheduled_for) : "Flexible"}
+                        </p>
                         {formatWhyNow(item.why_now) && (
                           <p className="mt-1 text-xs text-slate">{formatWhyNow(item.why_now)}</p>
                         )}
@@ -639,9 +780,11 @@ export default function App() {
                 <div className="mt-4 space-y-3">
                   {now?.later_today.length ? (
                     now.later_today.map((item) => (
-                      <div key={item.id} className="rounded-2xl border border-slate/10 p-4">
+                      <div key={item.task_id} className="rounded-2xl border border-slate/10 p-4">
                         <p className="text-sm text-slate">{item.title ?? "Task"}</p>
-                        <p className="font-medium">{formatReminderTime(item.scheduled_for)}</p>
+                        <p className="font-medium">
+                          {item.scheduled_for ? formatReminderTime(item.scheduled_for) : "Flexible"}
+                        </p>
                         {formatWhyNow(item.why_now) && (
                           <p className="mt-1 text-xs text-slate">{formatWhyNow(item.why_now)}</p>
                         )}
@@ -915,6 +1058,12 @@ export default function App() {
                             </button>
                             <button
                               className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                              onClick={() => openEditTask(task)}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="rounded-full border border-slate/20 px-3 py-1 text-xs"
                               onClick={() => handleCancelTask(task)}
                             >
                               Cancel
@@ -1154,7 +1303,7 @@ export default function App() {
             <div className="mt-4">
               <p className="text-xs uppercase text-slate">Recent tasks</p>
               <div className="mt-2 grid gap-2 md:grid-cols-2">
-                {tasks.slice(0, 4).map((task) => {
+                {recentCards.slice(0, 4).map(({ task, count }) => {
                   const selected = quickAddSource?.type === "recent" && quickAddSource.id === task.id;
                   return (
                     <button
@@ -1166,6 +1315,7 @@ export default function App() {
                     >
                       <p className="text-sm font-semibold">{task.title}</p>
                       <p className="text-xs text-slate">{formatTaskTime(task)}</p>
+                      <p className="text-xs text-slate">Used {count}×</p>
                     </button>
                   );
                 })}
@@ -1247,10 +1397,11 @@ export default function App() {
                     <option value="high">High</option>
                   </select>
                   <button
-                    className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                    className="rounded-full bg-ink px-4 py-2 text-sm text-white disabled:opacity-50"
                     onClick={handleQuickAddConfirm}
+                    disabled={quickAddSubmitting}
                   >
-                    Add task
+                    {quickAddSubmitting ? "Adding..." : "Add task"}
                   </button>
                 </div>
               </div>
@@ -1283,6 +1434,120 @@ export default function App() {
                     : "Dictation unavailable"}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingTask && editDraft && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate/40 px-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Edit task</h3>
+              <button
+                className="rounded-full border border-slate/20 px-3 py-1 text-xs"
+                onClick={() => {
+                  setEditingTask(null);
+                  setEditDraft(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-3">
+              <input
+                className="w-full rounded-lg border border-slate/20 p-2 text-sm"
+                value={editDraft.title}
+                onChange={(event) =>
+                  setEditDraft((draft) => (draft ? { ...draft, title: event.target.value } : draft))
+                }
+              />
+              <div className="grid gap-3 md:grid-cols-2">
+                <input
+                  className="rounded-lg border border-slate/20 p-2 text-sm"
+                  type="date"
+                  value={editDraft.date}
+                  onChange={(event) =>
+                    setEditDraft((draft) => (draft ? { ...draft, date: event.target.value } : draft))
+                  }
+                />
+                <div className="flex gap-2">
+                  <input
+                    className="w-full rounded-lg border border-slate/20 p-2 text-sm"
+                    type="time"
+                    value={editDraft.startTime}
+                    onChange={(event) =>
+                      setEditDraft((draft) =>
+                        draft ? { ...draft, startTime: event.target.value } : draft
+                      )
+                    }
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate/20 p-2 text-sm"
+                    type="time"
+                    value={editDraft.endTime}
+                    onChange={(event) =>
+                      setEditDraft((draft) =>
+                        draft ? { ...draft, endTime: event.target.value } : draft
+                      )
+                    }
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <select
+                  className="rounded-lg border border-slate/20 p-2 text-sm"
+                  value={editDraft.priority}
+                  onChange={(event) =>
+                    setEditDraft((draft) =>
+                      draft
+                        ? { ...draft, priority: event.target.value as ParseItem["priority"] }
+                        : draft
+                    )
+                  }
+                >
+                  <option value="low">Low</option>
+                  <option value="med">Medium</option>
+                  <option value="high">High</option>
+                </select>
+                <select
+                  className="rounded-lg border border-slate/20 p-2 text-sm"
+                  value={editDraft.recurrence}
+                  onChange={(event) =>
+                    setEditDraft((draft) =>
+                      draft
+                        ? { ...draft, recurrence: event.target.value as ParseItem["recurrence"] }
+                        : draft
+                    )
+                  }
+                >
+                  <option value="none">No recurrence</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="every_2_days">Every 2 days</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <p className="text-xs text-slate">
+                Leave end time blank to set a due time instead of a window.
+              </p>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                className="rounded-full bg-ink px-4 py-2 text-sm text-white"
+                onClick={handleEditSave}
+              >
+                Save changes
+              </button>
+              <button
+                className="rounded-full border border-slate/20 px-4 py-2 text-sm"
+                onClick={() => {
+                  setEditingTask(null);
+                  setEditDraft(null);
+                }}
+              >
+                Cancel
+              </button>
             </div>
           </div>
         </div>
