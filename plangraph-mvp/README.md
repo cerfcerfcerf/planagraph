@@ -62,31 +62,39 @@ Open `http://localhost:5173`.
 
 ## Environment configuration
 
-### Defaults (local LLM)
+### OpenAI (recommended)
 
-The backend defaults to a local OpenAI-compatible endpoint such as Ollama:
+Set your OpenAI API key and select the fast parsing model (default is `gpt-5-mini`).
 
 ```
-LLM_BASE_URL=http://localhost:11434/v1
-LLM_API_KEY=ollama
-LLM_MODEL=llama3.1
+OPENAI_API_KEY=your_api_key
+OPENAI_MODEL_FAST=gpt-5-mini
+OPENAI_MODEL_REASON=gpt-5.2
+OPENAI_BASE_URL=https://api.openai.com/v1
 USE_LLM=true
 DATABASE_URL=sqlite:///./plangraph.db
 APP_ENV=dev
 ```
 
+If you want “gpt‑5.0 mini”, set it explicitly:
+
+```
+OPENAI_MODEL_FAST=gpt-5.0-mini
+```
+
 ### OpenAI-compatible endpoint
 
 ```
-LLM_BASE_URL=https://your-endpoint/v1
-LLM_API_KEY=your_api_key
-LLM_MODEL=your_model_name
+OPENAI_BASE_URL=https://your-endpoint/v1
+OPENAI_API_KEY=your_api_key
+OPENAI_MODEL_FAST=your_model_name
+OPENAI_MODEL_REASON=your_reason_model
 USE_LLM=true
 ```
 
 ## Notes
 
-- The LLM is used only for plan parsing and short “why now” explanations. If the model returns invalid JSON, the backend falls back to the deterministic parser.
+- The LLM is used only for plan parsing. If the model returns invalid JSON or fails schema validation, the backend falls back to the deterministic parser.
 - Notifications use the browser Notifications API and only fire while the app is open (no background push support).
 - Voice dictation relies on the browser Web Speech API and is best supported in Chromium-based browsers; it may be unavailable in Firefox or privacy-hardened environments.
 

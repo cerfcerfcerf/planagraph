@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,9 +22,13 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(16), default="active")
     recurrence: Mapped[str | None] = mapped_column(String(32), nullable=True)
     recurrence_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     reminders: Mapped[list[Reminder]] = relationship(
@@ -39,7 +43,9 @@ class Reminder(Base):
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     state: Mapped[str] = mapped_column(String(16), default="scheduled")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
 
     task: Mapped[Task] = relationship(back_populates="reminders")
 
@@ -53,7 +59,7 @@ class Event(Base):
     reminder_id: Mapped[int | None] = mapped_column(
         ForeignKey("reminders.id"), nullable=True
     )
-    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 

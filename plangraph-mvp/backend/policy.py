@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -30,7 +30,8 @@ def _in_quiet_hours(scheduled_for: datetime, settings: Settings) -> bool:
     end = _parse_hhmm(settings.quiet_hours_end)
     if not start or not end:
         return False
-    current = scheduled_for.time()
+    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+    current = scheduled_for.astimezone(local_tz).time()
     if start < end:
         return start <= current <= end
     return current >= start or current <= end
@@ -42,14 +43,20 @@ def _apply_quiet_hours(scheduled_for: datetime, settings: Settings) -> datetime:
     end = _parse_hhmm(settings.quiet_hours_end)
     if not end:
         return scheduled_for
-    adjusted = datetime.combine(scheduled_for.date(), end) + timedelta(minutes=5)
-    if adjusted <= scheduled_for:
-        adjusted += timedelta(days=1)
-    return adjusted
+    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+    local_time = scheduled_for.astimezone(local_tz)
+    adjusted_local = datetime.combine(local_time.date(), end, tzinfo=local_tz) + timedelta(
+        minutes=5
+    )
+    if adjusted_local <= local_time:
+        adjusted_local += timedelta(days=1)
+    return adjusted_local.astimezone(timezone.utc)
 
 
 def _within_daily_budget(session: Session, settings: Settings, scheduled_for: datetime) -> bool:
-    day_start = datetime.combine(scheduled_for.date(), time(0, 0))
+    day_start = datetime.combine(
+        scheduled_for.astimezone(timezone.utc).date(), time(0, 0), tzinfo=timezone.utc
+    )
     day_end = day_start + timedelta(days=1)
     count = (
         session.query(Reminder)
@@ -62,7 +69,7 @@ def _within_daily_budget(session: Session, settings: Settings, scheduled_for: da
 def _learn_preferred_time(session: Session, task: Task) -> time | None:
     if not task.recurrence:
         return None
-    cutoff = datetime.utcnow() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     events = (
         session.query(Event)
         .filter(
@@ -93,58 +100,146 @@ def infer_priority(title: str, notes: str | None = None) -> str:
     return "med"
 
 
-def infer_task_type(title: str) -> str:
-    lowered = title.lower()
-    if any(keyword in lowered for keyword in ["meal", "breakfast", "lunch", "dinner", "sleep", "wake", "hygiene", "shower", "medication"]):
-        return "routine"
-    if any(keyword in lowered for keyword in ["doctor", "dentist", "meeting", "appointment", "flight"]):
-        return "appointment"
-    if any(keyword in lowered for keyword in ["class", "lecture", "lab", "study", "homework"]):
-        return "study"
-    if any(keyword in lowered for keyword in ["exercise", "gym", "workout", "run", "yoga"]):
+def infer_task_type(title: str, notes: str | None = None) -> str:
+    lowered = f"{title} {notes or ''}".lower()
+    if any(keyword in lowered for keyword in ["breakfast", "lunch", "dinner", "eat", "meal prep", "meal"]):
+        return "meal"
+    if any(keyword in lowered for keyword in ["sleep", "wake up", "wakeup", "bed"]):
+        return "sleep"
+    if any(keyword in lowered for keyword in ["pills", "meds", "vitamins", "medication"]):
+        return "medication"
+    if any(keyword in lowered for keyword in ["shower", "brush", "teeth", "hygiene"]):
+        return "hygiene"
+    if any(keyword in lowered for keyword in ["lecture", "class", "lab", "seminar"]):
+        return "class"
+    if any(keyword in lowered for keyword in ["gym", "workout", "run", "exercise"]):
         return "exercise"
     return "other"
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
+def _minutes_between(start: datetime, end: datetime) -> float:
+    return (end - start).total_seconds() / 60
+
+
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+        return value.replace(tzinfo=local_tz).astimezone(timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _time_target(task: Task) -> datetime | None:
+    return _ensure_utc(task.window_end) or _ensure_utc(task.due_at) or _ensure_utc(task.window_start)
+
+
+def _closing_soon(task: Task, now: datetime, threshold_minutes: int = 60) -> bool:
+    target = _time_target(task)
+    if not target:
+        return False
+    return 0 <= _minutes_between(now, target) <= threshold_minutes
 
 
 def is_actionable_now(task: Task, now: datetime, settings: Settings) -> bool:
     if task.status != "active":
         return False
-    if task.window_start and task.window_end:
-        if now < task.window_start - timedelta(minutes=settings.lead_time_minutes):
+    window_start = _ensure_utc(task.window_start)
+    window_end = _ensure_utc(task.window_end)
+    due_at = _ensure_utc(task.due_at)
+    if window_start and window_end:
+        early_margin = min(settings.lead_time_minutes, 30)
+        if now < window_start - timedelta(minutes=early_margin):
             return False
-        if now > task.window_end:
-            return False
-    if task.due_at:
-        grace = task.due_at + timedelta(minutes=30)
-        if now > grace:
-            return False
-    return True
+        return now <= window_end
+    if due_at:
+        lead_time = timedelta(minutes=settings.lead_time_minutes)
+        grace = timedelta(minutes=30)
+        return due_at - lead_time <= now <= due_at + grace
+    return task.created_at.date() == now.date()
 
 
 def should_fire(reminder: Reminder, task: Task, now: datetime, settings: Settings) -> bool:
-    if task.window_start and now < task.window_start - timedelta(minutes=settings.lead_time_minutes):
+    return (
+        reminder.state == "scheduled"
+        and reminder.scheduled_for <= now
+        and is_actionable_now(task, now, settings)
+    )
+
+
+def is_occurrence_expired(task: Task, now: datetime, settings: Settings) -> bool:
+    window_end = _ensure_utc(task.window_end)
+    due_at = _ensure_utc(task.due_at)
+    if window_end:
+        return now > window_end
+    if due_at:
+        return now > due_at + timedelta(minutes=30)
+    return task.created_at.date() < now.date()
+
+
+def _ignored_recently(task: Task) -> bool:
+    reminders = sorted(
+        (task.reminders or []),
+        key=lambda reminder: reminder.scheduled_for,
+        reverse=True,
+    )
+    recent = reminders[:2]
+    if len(recent) < 2:
         return False
-    if task.window_end and now > task.window_end:
-        return False
-    if task.due_at and now > task.due_at + timedelta(minutes=30):
-        return False
-    return True
+    return all(reminder.state in {"dismissed", "expired"} for reminder in recent)
 
 
 def urgency_score(task: Task, now: datetime) -> float:
-    priority_weights = {"low": 0.8, "med": 1.0, "high": 1.4}
-    routine_boost = 0.15 if task.task_type == "routine" else 0.0
-    base = priority_weights.get(task.priority, 1.0) + routine_boost
-    time_target = task.window_end or task.due_at or task.window_start
-    if not time_target:
-        return base
-    minutes_remaining = (time_target - now).total_seconds() / 60
-    if minutes_remaining <= 0:
-        overdue_boost = 0.5
+    routine_types = {"meal", "sleep", "medication", "hygiene"}
+    window_start = _ensure_utc(task.window_start)
+    window_end = _ensure_utc(task.window_end)
+    due_at = _ensure_utc(task.due_at)
+    if window_start and window_end:
+        minutes_to_close = _minutes_between(now, window_end)
+        base = 100 - _clamp(minutes_to_close, 0, 300) / 3
+    elif due_at:
+        minutes_to_due = _minutes_between(now, due_at)
+        base = 100 - _clamp(minutes_to_due, -60, 240) / 3
     else:
-        overdue_boost = 0.0
-    urgency = base + overdue_boost + max(0.0, 120 - minutes_remaining) / 120
-    return urgency
+        base = 50
+    base = _clamp(base, 0, 100)
+    priority_weight = {"low": 0, "med": 10, "high": 25}.get(task.priority, 10)
+    routine_boost = 15 if task.task_type in routine_types else 0
+    overdue_boost = 10 if due_at and _minutes_between(now, due_at) < 0 else 0
+    ignore_penalty = 10 if task.priority != "high" and _ignored_recently(task) else 0
+    return base + priority_weight + routine_boost + overdue_boost - ignore_penalty
+
+
+def build_explanation(task: Task, now: datetime) -> dict[str, object]:
+    reasons: list[str] = []
+    window_start = _ensure_utc(task.window_start)
+    window_end = _ensure_utc(task.window_end)
+    due_at = _ensure_utc(task.due_at)
+    if window_start and window_end:
+        minutes_to_close = _minutes_between(now, window_end)
+        if minutes_to_close >= 0:
+            reasons.append(f"window closes in {int(round(minutes_to_close))}m")
+    elif due_at:
+        minutes_to_due = _minutes_between(now, due_at)
+        if minutes_to_due >= 0:
+            reasons.append(f"due in {int(round(minutes_to_due))}m")
+        else:
+            reasons.append(f"overdue by {int(round(abs(minutes_to_due)))}m")
+    else:
+        reasons.append("scheduled for today")
+    if task.task_type in {"meal", "sleep", "medication", "hygiene"}:
+        reasons.append(f"routine: {task.task_type}")
+    if task.priority == "high":
+        reasons.append("high priority")
+    elif task.priority == "med":
+        reasons.append("medium priority")
+    if task.priority != "high" and _ignored_recently(task):
+        reasons.append("ignored recently")
+    return {"reasons": reasons, "score": round(urgency_score(task, now))}
 
 
 def roll_task_forward(task: Task) -> bool:
@@ -153,11 +248,26 @@ def roll_task_forward(task: Task) -> bool:
     if not delta_days:
         return False
     if task.due_at:
-        task.due_at = task.due_at + timedelta(days=delta_days)
-    if task.window_start:
-        task.window_start = task.window_start + timedelta(days=delta_days)
-    if task.window_end:
-        task.window_end = task.window_end + timedelta(days=delta_days)
+        task.due_at = _ensure_utc(task.due_at) + timedelta(days=delta_days)
+    window_start = _ensure_utc(task.window_start)
+    window_end = _ensure_utc(task.window_end)
+    if window_start and window_end:
+        duration = window_end - window_start
+        if duration.total_seconds() <= 0 and window_end.time() < window_start.time():
+            start_date = window_start.date()
+            duration = (
+                datetime.combine(
+                    start_date + timedelta(days=1), window_end.time(), tzinfo=timezone.utc
+                )
+                - datetime.combine(start_date, window_start.time(), tzinfo=timezone.utc)
+            )
+        new_start = window_start + timedelta(days=delta_days)
+        task.window_start = new_start
+        task.window_end = new_start + duration
+    elif window_start:
+        task.window_start = window_start + timedelta(days=delta_days)
+    elif window_end:
+        task.window_end = window_end + timedelta(days=delta_days)
     task.status = "active"
     return True
 
@@ -168,19 +278,26 @@ def schedule_reminder(session: Session, task: Task) -> Reminder | None:
     if settings.policy_mode == "adaptive":
         preferred = _learn_preferred_time(session, task)
         if preferred and task.window_start and task.window_end:
-            candidate = datetime.combine(task.window_start.date(), preferred)
+            window_date = task.window_start.astimezone(timezone.utc).date()
+            candidate = datetime.combine(window_date, preferred, tzinfo=timezone.utc)
             if task.window_start <= candidate <= task.window_end:
                 scheduled_for = candidate
     if scheduled_for is None:
-        if task.due_at:
-            scheduled_for = task.due_at - timedelta(minutes=settings.lead_time_minutes)
-        elif task.window_start:
-            scheduled_for = task.window_start
+        due_at = _ensure_utc(task.due_at)
+        window_start = _ensure_utc(task.window_start)
+        if due_at:
+            scheduled_for = due_at - timedelta(minutes=settings.lead_time_minutes)
+        elif window_start:
+            scheduled_for = window_start
     if not scheduled_for:
         return None
     scheduled_for = _apply_quiet_hours(scheduled_for, settings)
     if not _within_daily_budget(session, settings, scheduled_for):
-        return None
+        if not (
+            task.priority == "high"
+            or _closing_soon(task, scheduled_for, threshold_minutes=60)
+        ):
+            return None
     reminder = Reminder(task_id=task.id, scheduled_for=scheduled_for)
     session.add(reminder)
     session.commit()
@@ -191,7 +308,7 @@ def schedule_reminder(session: Session, task: Task) -> Reminder | None:
 def schedule_upcoming_reminders(session: Session, now: datetime) -> None:
     settings = get_settings(session)
     upcoming_window = now + timedelta(hours=6)
-    day_start = datetime.combine(now.date(), time(0, 0))
+    day_start = datetime.combine(now.date(), time(0, 0), tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
     existing_count = (
         session.query(Reminder)
@@ -199,16 +316,10 @@ def schedule_upcoming_reminders(session: Session, now: datetime) -> None:
         .count()
     )
     remaining_budget = max(settings.daily_budget - existing_count, 0)
-    if remaining_budget <= 0:
-        return
-    tasks = (
-        session.query(Task)
-        .filter(Task.status == "active")
-        .all()
-    )
-    candidates = []
+    tasks = session.query(Task).filter(Task.status == "active").all()
+    candidates: list[Task] = []
     for task in tasks:
-        target = task.due_at or task.window_start
+        target = _time_target(task)
         if not target or target > upcoming_window:
             continue
         has_reminder = (
@@ -223,5 +334,7 @@ def schedule_upcoming_reminders(session: Session, now: datetime) -> None:
             continue
         candidates.append(task)
     candidates.sort(key=lambda task: urgency_score(task, now), reverse=True)
-    for task in candidates[:remaining_budget]:
+    k_limit = min(settings.daily_budget, 6)
+    slots = min(remaining_budget, k_limit) if remaining_budget > 0 else k_limit
+    for task in candidates[:slots]:
         schedule_reminder(session, task)

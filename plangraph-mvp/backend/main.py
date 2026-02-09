@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+import statistics
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ from llm_client import LLMClient
 from models import Event, Reminder, Task, Template
 from parser import deterministic_parse, infer_priority, infer_task_type, recurrence_suggestions
 from policy import (
+    build_explanation,
     get_settings,
     is_actionable_now,
     roll_task_forward,
@@ -29,6 +31,7 @@ from schemas import (
     InsightsSummaryResponse,
     NowAction,
     NowResponse,
+    UpcomingTask,
     ParseRequest,
     ParseResponse,
     LazySuggestionRequest,
@@ -81,14 +84,22 @@ def get_db() -> Iterable[Session]:
         session.close()
 
 
+def _ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+        return value.replace(tzinfo=local_tz).astimezone(timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _parse_llm_items(text: str) -> list[dict[str, Any]] | None:
     client = LLMClient()
-    schema_hint = (
-        "{items:[{title:string,date:'YYYY-MM-DD|null',due_time:'HH:MM|null',"
-        "window_start:'YYYY-MM-DDTHH:MM:SS|null',window_end:'YYYY-MM-DDTHH:MM:SS|null',"
-        "priority:'low|med|high',recurrence:'none|daily|weekly|every_2_days|custom',"
-        "recurrence_detail:'string|null',confidence:number,notes:'string|null'}]}"
-    )
+    schema_hint = {
+        "name": "parse_response",
+        "schema": ParseResponse.model_json_schema(),
+        "strict": True,
+    }
     try:
         response = client.parse_plan(text, schema_hint)
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -102,23 +113,37 @@ def _parse_llm_items(text: str) -> list[dict[str, Any]] | None:
                     payload.get("title", ""), payload.get("notes")
                 )
             if not payload.get("task_type"):
-                payload["task_type"] = infer_task_type(payload.get("title", ""))
-            if not payload.get("recurrence_suggestions"):
-                payload["recurrence_suggestions"] = recurrence_suggestions(
-                    payload.get("title", "")
+                payload["task_type"] = infer_task_type(
+                    payload.get("title", ""), payload.get("notes")
                 )
-            if payload.get("task_type") == "routine" and payload.get("recurrence") in {
-                None,
-                "none",
-            }:
+            if not payload.get("recurrence_suggestions"):
+                detected_date = None
+                if payload.get("date"):
+                    try:
+                        detected_date = datetime.fromisoformat(payload["date"]).date()
+                    except ValueError:
+                        detected_date = None
+                payload["recurrence_suggestions"] = recurrence_suggestions(
+                    payload.get("title", ""),
+                    detected_date,
+                )
+            if payload.get("task_type") in {"meal", "sleep", "medication", "hygiene"} and payload.get(
+                "recurrence"
+            ) in {None, "none"}:
                 payload["recurrence"] = "daily"
-                payload["recurrence_detail"] = "routine"
+                payload["recurrence_detail"] = "auto-routine"
             if payload.get("window_start") and payload.get("window_end"):
                 try:
-                    start_dt = datetime.fromisoformat(payload["window_start"])
-                    end_dt = datetime.fromisoformat(payload["window_end"])
+                    start_dt = _ensure_utc(datetime.fromisoformat(payload["window_start"]))
+                    end_dt = _ensure_utc(datetime.fromisoformat(payload["window_end"]))
                     if end_dt < start_dt:
-                        payload["window_end"] = (end_dt + timedelta(days=1)).isoformat()
+                        end_dt = end_dt + timedelta(days=1)
+                    payload["window_start"] = (
+                        start_dt.isoformat().replace("+00:00", "Z") if start_dt else payload["window_start"]
+                    )
+                    payload["window_end"] = (
+                        end_dt.isoformat().replace("+00:00", "Z") if end_dt else payload["window_end"]
+                    )
                 except ValueError:
                     pass
             items.append(payload)
@@ -164,17 +189,24 @@ async def create_tasks(
             payload_data["priority"] = infer_priority(
                 payload_data.get("title", ""), payload_data.get("notes")
             )
-        payload_data["task_type"] = infer_task_type(payload_data.get("title", ""))
-        if payload_data.get("task_type") == "routine" and not payload_data.get("recurrence"):
+        payload_data["task_type"] = infer_task_type(
+            payload_data.get("title", ""), payload_data.get("notes")
+        )
+        if payload_data.get("task_type") in {"meal", "sleep", "medication", "hygiene"} and not payload_data.get(
+            "recurrence"
+        ):
             payload_data["recurrence"] = "daily"
-            payload_data["recurrence_detail"] = "routine"
+            payload_data["recurrence_detail"] = "auto-routine"
+        payload_data["due_at"] = _ensure_utc(payload_data.get("due_at"))
+        payload_data["window_start"] = _ensure_utc(payload_data.get("window_start"))
+        payload_data["window_end"] = _ensure_utc(payload_data.get("window_end"))
         task = Task(**payload_data)
         db.add(task)
         db.flush()
         db.add(Event(type="task_created", task_id=task.id, reminder_id=None))
         created.append(task)
     db.commit()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for task in created:
         target = task.due_at or task.window_start
         if target and target <= now + timedelta(hours=6):
@@ -193,9 +225,15 @@ async def update_task(
     task = db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    previous_status = task.status
+    for field, value in updates.items():
+        if field in {"due_at", "window_start", "window_end"}:
+            value = _ensure_utc(value)
         setattr(task, field, value)
     db.add(task)
+    if previous_status != "archived" and updates.get("status") == "archived":
+        db.add(Event(type="task_skipped", task_id=task.id, reminder_id=None))
     db.commit()
     db.refresh(task)
     return TaskOut.model_validate(task)
@@ -221,77 +259,71 @@ async def update_settings(
     return SettingsOut.model_validate(settings)
 
 
-def _generate_why_now(task: Task, reminder: Reminder | None) -> str:
-    default = "This keeps your plan on track while the window is open."
-    if not USE_LLM:
-        return default
-    client = LLMClient()
-    prompt = f"Task: {task.title}. Priority: {task.priority}."
-    if reminder:
-        prompt += f" Scheduled for {reminder.scheduled_for.isoformat()}."
-    try:
-        response = client.why_now(prompt)
-        return response or default
-    except RuntimeError:
-        return default
-
-
 @app.get("/now", response_model=NowResponse)
 async def now_view(db: Session = Depends(get_db)) -> NowResponse:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     next_window = now + timedelta(hours=6)
-    end_of_day = datetime.combine(now.date(), datetime.max.time())
-    tasks = (
-        db.execute(select(Task).where(Task.status == "active")).scalars().all()
-    )
+    end_of_day = datetime.combine(now.date(), datetime.max.time(), tzinfo=timezone.utc)
+    tasks = db.execute(select(Task).where(Task.status == "active")).scalars().all()
     settings = get_settings(db)
     actionable = [task for task in tasks if is_actionable_now(task, now, settings)]
     next_action: NowAction | None = None
     if actionable:
         best = max(actionable, key=lambda task: urgency_score(task, now))
+        created_reminder = False
+        reminder = (
+            db.execute(
+                select(Reminder)
+                .where(Reminder.task_id == best.id, Reminder.state == "scheduled")
+                .order_by(Reminder.scheduled_for.asc())
+            )
+            .scalars()
+            .first()
+        )
+        if not reminder:
+            reminder = Reminder(task_id=best.id, scheduled_for=now)
+            db.add(reminder)
+            db.flush()
+            created_reminder = True
         next_action = NowAction(
-            reminder_id=None,
+            reminder_id=reminder.id if reminder else None,
             task_id=best.id,
             title=best.title,
             scheduled_for=best.due_at or best.window_start,
             window_start=best.window_start,
             window_end=best.window_end,
             priority=best.priority,
-            why_now=_generate_why_now(best, None),
+            why_now=build_explanation(best, now),
         )
+        if created_reminder:
+            db.commit()
 
-    reminders = (
-        db.execute(
-            select(Reminder)
-            .where(Reminder.state == "scheduled")
-            .order_by(Reminder.scheduled_for.asc())
-        )
-        .scalars()
-        .all()
-    )
-    next_6 = [r for r in reminders if now <= r.scheduled_for <= next_window]
-    later = [r for r in reminders if next_window < r.scheduled_for <= end_of_day]
+    upcoming_tasks: list[Task] = []
+    later_tasks: list[Task] = []
+    for task in tasks:
+        target = _ensure_utc(task.due_at) or _ensure_utc(task.window_start)
+        if not target:
+            continue
+        if now <= target <= next_window:
+            upcoming_tasks.append(task)
+        elif next_window < target <= end_of_day:
+            later_tasks.append(task)
+
+    def _task_payload(task: Task) -> dict[str, Any]:
+        return {
+            "task_id": task.id,
+            "title": task.title,
+            "scheduled_for": task.due_at or task.window_start,
+            "window_start": task.window_start,
+            "window_end": task.window_end,
+            "priority": task.priority,
+            "why_now": build_explanation(task, now),
+        }
 
     return NowResponse(
         next_best_action=next_action,
-        next_6_hours=[
-            ReminderOut.model_validate(
-                {
-                    **r.__dict__,
-                    "title": db.get(Task, r.task_id).title if db.get(Task, r.task_id) else None,
-                }
-            )
-            for r in next_6
-        ],
-        later_today=[
-            ReminderOut.model_validate(
-                {
-                    **r.__dict__,
-                    "title": db.get(Task, r.task_id).title if db.get(Task, r.task_id) else None,
-                }
-            )
-            for r in later
-        ],
+        next_6_hours=[UpcomingTask.model_validate(_task_payload(task)) for task in upcoming_tasks],
+        later_today=[UpcomingTask.model_validate(_task_payload(task)) for task in later_tasks],
     )
 
 
@@ -305,7 +337,7 @@ async def reminder_action(
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
     task = db.get(Task, reminder.task_id)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if payload.action == "done":
         reminder.state = "done"
         if task:
@@ -334,17 +366,23 @@ async def reminder_action(
 
 @app.get("/insights", response_model=InsightsResponse)
 async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
-    now = datetime.utcnow().date()
+    now = datetime.now(timezone.utc).date()
     start_day = now - timedelta(days=6)
     days = [(start_day + timedelta(days=idx)).isoformat() for idx in range(7)]
     events = (
-        db.execute(select(Event).where(Event.ts >= datetime.combine(start_day, datetime.min.time())))
+        db.execute(
+            select(Event).where(
+                Event.ts >= datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
+            )
+        )
         .scalars()
         .all()
     )
     daily: dict[str, dict[str, int]] = {
-        day: {"notifications": 0, "completions": 0, "sent": 0} for day in days
+        day: {"notifications": 0, "completions": 0, "sent": 0, "expired": 0} for day in days
     }
+    sent_lookup: dict[int, datetime] = {}
+    completion_delays: dict[str, list[float]] = {day: [] for day in days}
     for event in events:
         day = event.ts.date().isoformat()
         if day not in daily:
@@ -352,8 +390,15 @@ async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
         if event.type == "reminder_sent":
             daily[day]["notifications"] += 1
             daily[day]["sent"] += 1
+            if event.reminder_id is not None:
+                sent_lookup[event.reminder_id] = event.ts
+        if event.type == "reminder_expired":
+            daily[day]["expired"] += 1
         if event.type == "task_done":
             daily[day]["completions"] += 1
+            if event.reminder_id is not None and event.reminder_id in sent_lookup:
+                delay_minutes = (event.ts - sent_lookup[event.reminder_id]).total_seconds() / 60
+                completion_delays[day].append(delay_minutes)
     notifications_per_day = [
         {"date": day, "value": daily[day]["notifications"]} for day in days
     ]
@@ -373,11 +418,29 @@ async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
         }
         for day in days
     ]
+    stale_reminder_rate = [
+        {
+            "date": day,
+            "value": daily[day]["expired"] / daily[day]["sent"] if daily[day]["sent"] else 0,
+        }
+        for day in days
+    ]
+    median_completion_delay = [
+        {
+            "date": day,
+            "value": round(statistics.median(completion_delays[day]), 2)
+            if completion_delays[day]
+            else 0,
+        }
+        for day in days
+    ]
     return InsightsResponse(
         notifications_per_day=notifications_per_day,
         completions_per_day=completions_per_day,
         missed_rate_proxy=missed_rate_proxy,
         notifications_per_completion=notifications_per_completion,
+        stale_reminder_rate=stale_reminder_rate,
+        median_completion_delay=median_completion_delay,
     )
 
 
@@ -405,7 +468,7 @@ async def use_template(template_id: int, db: Session = Depends(get_db)) -> TaskO
     template = db.get(Template, template_id)
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     window_start = now.replace(minute=0, second=0, microsecond=0)
     window_end = window_start + timedelta(minutes=template.default_duration_min)
     task = Task(
@@ -439,11 +502,15 @@ async def insights_summary(db: Session = Depends(get_db)) -> InsightsSummaryResp
         total_notifications / total_completions if total_completions else total_notifications
     )
     missed_rate = sum(item["value"] for item in insights_payload.missed_rate_proxy) / 7
+    stale_rate = sum(item["value"] for item in insights_payload.stale_reminder_rate) / 7
+    median_delay = sum(item["value"] for item in insights_payload.median_completion_delay) / 7
     metrics = {
         "completion_rate": round(completion_rate, 2),
         "notifications_per_day": round(notifications_per_day, 2),
         "notifications_per_completion": round(notifications_per_completion, 2),
         "missed_rate_proxy": round(missed_rate, 2),
+        "stale_reminder_rate": round(stale_rate, 2),
+        "median_completion_delay": round(median_delay, 2),
     }
     if USE_LLM:
         try:
@@ -464,6 +531,8 @@ async def insights_summary(db: Session = Depends(get_db)) -> InsightsSummaryResp
         "This week shows a steady rhythm of reminders and completions. "
         f"Completion rate averaged {metrics['completion_rate'] * 100:.0f}% with "
         f"{metrics['notifications_per_day']} notifications per day. "
+        f"Stale reminders averaged {metrics['stale_reminder_rate'] * 100:.0f}% and "
+        f"median completion delay was {metrics['median_completion_delay']} minutes. "
         "Use the missed-rate proxy to see where nudges might be too early. "
         "Keep experiments small and adjust settings weekly."
     )
@@ -504,7 +573,7 @@ async def lazy_suggestions(payload: LazySuggestionRequest) -> LazySuggestionResp
 async def seed(db: Session = Depends(get_db)) -> dict[str, Any]:
     if os.getenv("APP_ENV") != "dev":
         raise HTTPException(status_code=403, detail="Seed disabled")
-    base_day = datetime.utcnow().date() - timedelta(days=6)
+    base_day = datetime.now(timezone.utc).date() - timedelta(days=6)
     sample_tasks = []
     for idx in range(7):
         day = base_day + timedelta(days=idx)
@@ -512,7 +581,8 @@ async def seed(db: Session = Depends(get_db)) -> dict[str, Any]:
             Task(
                 title=f"Daily review {day.isoformat()}",
                 priority="med",
-                due_at=datetime.combine(day, datetime.min.time()) + timedelta(hours=18),
+                due_at=datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+                + timedelta(hours=18),
             )
         )
     for task in sample_tasks:
@@ -520,7 +590,7 @@ async def seed(db: Session = Depends(get_db)) -> dict[str, Any]:
         db.flush()
         db.add(Event(type="task_created", task_id=task.id, reminder_id=None))
         db.add(Event(type="reminder_sent", task_id=task.id, reminder_id=None, ts=task.due_at))
-        if task.due_at and task.due_at.date() <= datetime.utcnow().date():
+        if task.due_at and task.due_at.date() <= datetime.now(timezone.utc).date():
             db.add(Event(type="task_done", task_id=task.id, reminder_id=None, ts=task.due_at))
         schedule_reminder(db, task)
     db.commit()

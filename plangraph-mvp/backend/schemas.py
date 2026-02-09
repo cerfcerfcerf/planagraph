@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+JSON_ENCODERS = {
+    datetime: lambda dt: dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+}
 
-class ParseRequest(BaseModel):
+
+class APIModel(BaseModel):
+    model_config = ConfigDict(json_encoders=JSON_ENCODERS)
+
+
+class ParseRequest(APIModel):
     text: str
 
 
-class ParseItem(BaseModel):
+class ParseItem(APIModel):
     title: str
     date: str | None = None
     due_time: str | None = None
@@ -25,18 +33,26 @@ class ParseItem(BaseModel):
     task_type: str | None = None
 
 
-class ParseResponse(BaseModel):
+class ParseResponse(APIModel):
     items: list[ParseItem]
 
 
-class TaskBase(BaseModel):
+class TaskBase(APIModel):
     title: str
     notes: str | None = None
     due_at: datetime | None = None
     window_start: datetime | None = None
     window_end: datetime | None = None
     priority: Literal["low", "med", "high"] = "med"
-    task_type: Literal["routine", "appointment", "study", "exercise", "other"] = "other"
+    task_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] = "other"
     recurrence: str | None = None
     recurrence_detail: str | None = None
 
@@ -45,21 +61,29 @@ class TaskCreate(TaskBase):
     pass
 
 
-class TaskUpdate(BaseModel):
+class TaskUpdate(APIModel):
     title: str | None = None
     notes: str | None = None
     due_at: datetime | None = None
     window_start: datetime | None = None
     window_end: datetime | None = None
     priority: Literal["low", "med", "high"] | None = None
-    task_type: Literal["routine", "appointment", "study", "exercise", "other"] | None = None
+    task_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] | None = None
     status: Literal["active", "completed", "archived"] | None = None
     recurrence: str | None = None
     recurrence_detail: str | None = None
 
 
 class TaskOut(TaskBase):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, json_encoders=JSON_ENCODERS)
 
     id: int
     status: str
@@ -67,12 +91,12 @@ class TaskOut(TaskBase):
     updated_at: datetime
 
 
-class TaskListResponse(BaseModel):
+class TaskListResponse(APIModel):
     tasks: list[TaskOut]
 
 
-class SettingsOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class SettingsOut(APIModel):
+    model_config = ConfigDict(from_attributes=True, json_encoders=JSON_ENCODERS)
 
     policy_mode: Literal["baseline", "adaptive"]
     daily_budget: int
@@ -81,7 +105,7 @@ class SettingsOut(BaseModel):
     lead_time_minutes: int
 
 
-class SettingsUpdate(BaseModel):
+class SettingsUpdate(APIModel):
     policy_mode: Literal["baseline", "adaptive"] | None = None
     daily_budget: int | None = None
     quiet_hours_start: str | None = None
@@ -89,17 +113,23 @@ class SettingsUpdate(BaseModel):
     lead_time_minutes: int | None = None
 
 
-class ReminderOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class WhyNow(APIModel):
+    reasons: list[str]
+    score: float
+
+
+class ReminderOut(APIModel):
+    model_config = ConfigDict(from_attributes=True, json_encoders=JSON_ENCODERS)
 
     id: int
     task_id: int
     scheduled_for: datetime
     state: str
     title: str | None = None
+    why_now: WhyNow | None = None
 
 
-class NowAction(BaseModel):
+class NowAction(APIModel):
     reminder_id: int | None
     task_id: int | None
     title: str
@@ -107,56 +137,76 @@ class NowAction(BaseModel):
     window_start: datetime | None
     window_end: datetime | None
     priority: str
-    why_now: str
+    why_now: WhyNow
 
 
-class NowResponse(BaseModel):
+class UpcomingTask(APIModel):
+    task_id: int
+    title: str
+    scheduled_for: datetime | None
+    window_start: datetime | None
+    window_end: datetime | None
+    priority: str
+    why_now: WhyNow
+
+
+class NowResponse(APIModel):
     next_best_action: NowAction | None
-    next_6_hours: list[ReminderOut]
-    later_today: list[ReminderOut]
+    next_6_hours: list[UpcomingTask]
+    later_today: list[UpcomingTask]
 
 
-class ReminderActionRequest(BaseModel):
+class ReminderActionRequest(APIModel):
     action: Literal["done", "snooze_10", "snooze_30", "dismiss"]
 
 
-class InsightSeries(BaseModel):
+class InsightSeries(APIModel):
     label: str
     points: list[dict]
 
 
-class InsightsResponse(BaseModel):
+class InsightsResponse(APIModel):
     notifications_per_day: list[dict]
     completions_per_day: list[dict]
     missed_rate_proxy: list[dict]
     notifications_per_completion: list[dict]
+    stale_reminder_rate: list[dict]
+    median_completion_delay: list[dict]
 
 
-class InsightsSummaryResponse(BaseModel):
+class InsightsSummaryResponse(APIModel):
     narrative: str
     recommendations: list[str]
     metrics: dict[str, float]
 
 
-class LazySuggestionRequest(BaseModel):
+class LazySuggestionRequest(APIModel):
     title: str
     notes: str | None = None
 
 
-class LazySuggestionResponse(BaseModel):
+class LazySuggestionResponse(APIModel):
     suggestions: list[str]
 
 
-class TemplateCreate(BaseModel):
+class TemplateCreate(APIModel):
     title: str
     default_duration_min: int = 30
-    default_type: Literal["routine", "appointment", "study", "exercise", "other"] = "other"
+    default_type: Literal[
+        "meal",
+        "sleep",
+        "medication",
+        "hygiene",
+        "class",
+        "exercise",
+        "other",
+    ] = "other"
     default_priority: Literal["low", "med", "high"] = "med"
     pinned: bool = False
 
 
 class TemplateOut(TemplateCreate):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, json_encoders=JSON_ENCODERS)
 
     id: int
     used_count: int

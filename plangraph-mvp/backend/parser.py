@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 from schemas import ParseItem
 
@@ -43,6 +43,16 @@ def _extract_time_range(text: str) -> tuple[time, time] | None:
     return start, end
 
 
+def _extract_leading_time(text: str) -> tuple[time, str] | None:
+    match = re.match(r"^\s*(\d{1,2}:\d{2})\s*[–-]\s*(.+)$", text)
+    if not match:
+        return None
+    start = _extract_time(match.group(1))
+    if not start:
+        return None
+    return start, match.group(2).strip()
+
+
 def _extract_date(text: str, today: date) -> date | None:
     lowered = text.lower()
     if "today" in lowered:
@@ -81,41 +91,33 @@ def infer_priority(title: str, notes: str | None = None) -> str:
     return "med"
 
 
-def infer_task_type(title: str) -> str:
-    lowered = title.lower()
-    if any(
-        keyword in lowered
-        for keyword in [
-            "meal",
-            "breakfast",
-            "lunch",
-            "dinner",
-            "sleep",
-            "wake",
-            "hygiene",
-            "shower",
-            "medication",
-        ]
-    ):
-        return "routine"
-    if any(keyword in lowered for keyword in ["doctor", "dentist", "meeting", "flight", "appointment"]):
-        return "appointment"
-    if any(keyword in lowered for keyword in ["study", "class", "lecture", "lab", "homework"]):
-        return "study"
-    if any(keyword in lowered for keyword in ["exercise", "gym", "workout", "run", "yoga"]):
+def infer_task_type(title: str, notes: str | None = None) -> str:
+    lowered = f"{title} {notes or ''}".lower()
+    if any(keyword in lowered for keyword in ["breakfast", "lunch", "dinner", "eat", "meal prep", "meal"]):
+        return "meal"
+    if any(keyword in lowered for keyword in ["sleep", "wake up", "wakeup", "bed"]):
+        return "sleep"
+    if any(keyword in lowered for keyword in ["pills", "meds", "vitamins", "medication"]):
+        return "medication"
+    if any(keyword in lowered for keyword in ["shower", "brush", "teeth", "hygiene"]):
+        return "hygiene"
+    if any(keyword in lowered for keyword in ["lecture", "class", "lab", "seminar"]):
+        return "class"
+    if any(keyword in lowered for keyword in ["gym", "workout", "run", "exercise"]):
         return "exercise"
     return "other"
 
 
-def recurrence_suggestions(title: str) -> list[dict]:
+def recurrence_suggestions(title: str, detected_date: date | None = None) -> list[dict]:
     lowered = title.lower()
     suggestions: list[dict] = []
-    if any(keyword in lowered for keyword in ["class", "lecture", "lab", "gym"]):
+    if detected_date and any(keyword in lowered for keyword in ["class", "lecture", "lab"]):
+        weekday = detected_date.strftime("%A").lower()
         suggestions.append(
             {
                 "recurrence": "weekly",
-                "recurrence_detail": "weekdays",
-                "confidence": 0.6,
+                "recurrence_detail": weekday,
+                "confidence": 0.7,
             }
         )
     return suggestions
@@ -145,6 +147,32 @@ def _default_window(base_date: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _duration_minutes(title: str, notes: str | None = None) -> int:
+    lowered = f"{title} {notes or ''}".lower()
+    if any(keyword in lowered for keyword in ["wake", "hygiene", "breakfast", "shower"]):
+        return 30
+    if "commute" in lowered:
+        return 30
+    if any(keyword in lowered for keyword in ["lecture", "lab"]):
+        return 90
+    if any(keyword in lowered for keyword in ["lunch", "dinner"]):
+        return 60
+    if "gym" in lowered:
+        return 90
+    if "homework" in lowered:
+        return 120
+    if "sleep" in lowered:
+        return 420
+    return 30
+
+
+def _to_utc_iso(value: datetime) -> str:
+    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=local_tz)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def deterministic_parse(text: str) -> list[ParseItem]:
     today = date.today()
     lines = [line.strip() for line in text.splitlines()]
@@ -162,19 +190,19 @@ def deterministic_parse(text: str) -> list[ParseItem]:
         notes = " ".join(buffer[1:]).strip() if len(buffer) > 1 else None
         detected_date = _extract_date(description, today) or today
         recurrence, recurrence_detail = _extract_recurrence(description)
-        task_type = infer_task_type(title)
+        task_type = infer_task_type(title, notes)
         priority = infer_priority(title, notes)
-        suggestions = recurrence_suggestions(title)
-        if task_type == "routine" and recurrence == "none":
+        suggestions = recurrence_suggestions(title, detected_date)
+        if task_type in {"meal", "sleep", "medication", "hygiene"} and recurrence == "none":
             recurrence = "daily"
-            recurrence_detail = "routine"
+            recurrence_detail = "auto-routine"
         if current_range:
             start, end = current_range
             end_date = detected_date
             if end < start:
                 end_date = detected_date + timedelta(days=1)
-            window_start = datetime.combine(detected_date, start).isoformat()
-            window_end = datetime.combine(end_date, end).isoformat()
+            window_start = _to_utc_iso(datetime.combine(detected_date, start))
+            window_end = _to_utc_iso(datetime.combine(end_date, end))
             items.append(
                 ParseItem(
                     title=title,
@@ -218,8 +246,8 @@ def deterministic_parse(text: str) -> list[ParseItem]:
                         title=title,
                         date=detected_date.isoformat(),
                         due_time=None,
-                        window_start=window_start.isoformat(),
-                        window_end=window_end.isoformat(),
+                        window_start=_to_utc_iso(window_start),
+                        window_end=_to_utc_iso(window_end),
                         priority=priority,
                         recurrence=recurrence,
                         recurrence_detail=recurrence_detail,
@@ -239,6 +267,47 @@ def deterministic_parse(text: str) -> list[ParseItem]:
         if range_only and re.fullmatch(r"\s*\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}\s*", line):
             flush_buffer()
             current_range = range_only
+            continue
+        leading_time = _extract_leading_time(line) if not range_only else None
+        if leading_time and not current_range:
+            start_time, remainder = leading_time
+            description = remainder
+            detected_date = _extract_date(description, today) or today
+            notes = None
+            task_type = infer_task_type(remainder, notes)
+            priority = infer_priority(remainder, notes)
+            recurrence, recurrence_detail = _extract_recurrence(description)
+            suggestions = recurrence_suggestions(remainder, detected_date)
+            if task_type in {"meal", "sleep", "medication", "hygiene"} and recurrence == "none":
+                recurrence = "daily"
+                recurrence_detail = "auto-routine"
+            if task_type == "sleep":
+                window_start = _to_utc_iso(datetime.combine(detected_date, time(23, 30)))
+                window_end = _to_utc_iso(
+                    datetime.combine(detected_date + timedelta(days=1), time(6, 30))
+                )
+            else:
+                duration = _duration_minutes(remainder, notes)
+                window_start_dt = datetime.combine(detected_date, start_time)
+                window_end_dt = window_start_dt + timedelta(minutes=duration)
+                window_start = _to_utc_iso(window_start_dt)
+                window_end = _to_utc_iso(window_end_dt)
+            items.append(
+                ParseItem(
+                    title=remainder,
+                    date=detected_date.isoformat(),
+                    due_time=None,
+                    window_start=window_start,
+                    window_end=window_end,
+                    priority=priority,
+                    recurrence=recurrence,
+                    recurrence_detail=recurrence_detail,
+                    confidence=0.55,
+                    notes=notes,
+                    recurrence_suggestions=suggestions or None,
+                    task_type=task_type,
+                )
+            )
             continue
         if current_range:
             buffer.append(line)
