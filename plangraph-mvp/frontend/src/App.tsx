@@ -25,22 +25,9 @@ import type {
   Template,
   WhyNow,
 } from "./types";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { format, parseISO } from "date-fns";
 
-const pages = ["Now", "Add", "Tasks", "Policy", "Insights"] as const;
+const pages = ["Now", "Add", "Tasks", "Nudges", "Insights"] as const;
 
 type Page = (typeof pages)[number];
 
@@ -269,14 +256,14 @@ export default function App() {
       (window as { SpeechRecognition?: unknown }).SpeechRecognition ||
       (window as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
-    const recognition = new (SpeechRecognition as new () => SpeechRecognition)();
+    const recognition = new (SpeechRecognition as new () => any)();
     recognition.lang = "en-US";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
     recognition.onstart = () => setIsDictating(true);
     recognition.onend = () => setIsDictating(false);
     recognition.onerror = () => setIsDictating(false);
-    recognition.onresult = (event) => {
+    recognition.onresult = (event: any) => {
       const transcript = event.results[0][0].transcript;
       setQuickAddText((prev) => `${prev} ${transcript}`.trim());
     };
@@ -419,7 +406,7 @@ export default function App() {
       priority: quickAddDraft.priority,
       recurrence: quickAddDraft.recurrence === "none" ? null : quickAddDraft.recurrence,
       recurrence_detail: quickAddDraft.recurrence_detail,
-      task_type: quickAddDraft.task_type ?? "other",
+      task_type: (quickAddDraft.task_type as Task["task_type"]) ?? "other",
     };
     try {
       setQuickAddSubmitting(true);
@@ -469,7 +456,12 @@ export default function App() {
   }
 
   async function handleSave() {
-    const payloads = parsedItems.map((item) => {
+    const validItems = parsedItems.filter((item) => !item.parse_error);
+    if (!validItems.length) {
+      showToast("Fix parse errors before saving.");
+      return;
+    }
+    const payloads = validItems.map((item) => {
       const dueAt = combineDateTime(item.date, item.due_time);
       return {
         title: item.title,
@@ -480,7 +472,7 @@ export default function App() {
         priority: item.priority,
         recurrence: item.recurrence === "none" ? null : item.recurrence,
         recurrence_detail: item.recurrence_detail,
-        task_type: item.task_type ?? "other",
+        task_type: (item.task_type as Task["task_type"]) ?? "other",
       };
     });
     await createTasks(payloads);
@@ -510,7 +502,7 @@ export default function App() {
     setParsedItems(updated);
   }
 
-  async function handleReminder(action: string) {
+  async function handleReminder(action: "done" | "snooze" | "ignore" | "lazy", reason?: string) {
     if (!now?.next_best_action?.reminder_id) {
       showToast("No reminder available for this task yet.");
       return;
@@ -523,7 +515,7 @@ export default function App() {
     }
     try {
       setReminderSubmitting(true);
-      const response = await reminderAction(reminderId, action);
+      const response = await reminderAction(reminderId, action, reason);
       if (import.meta.env.DEV) {
         console.log("reminderAction response", response);
       }
@@ -717,24 +709,24 @@ export default function App() {
                       </button>
                       <button
                         className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
-                        onClick={() => handleReminder("snooze_10")}
+                        onClick={() => handleReminder("snooze")}
                         disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
-                        Snooze 10
+                        Snooze
                       </button>
                       <button
                         className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
-                        onClick={() => handleReminder("snooze_30")}
+                        onClick={() => handleReminder("ignore")}
                         disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
-                        Snooze 30
+                        Ignore
                       </button>
                       <button
                         className="rounded-full border border-slate/20 px-4 py-2 text-sm disabled:opacity-50"
-                        onClick={() => handleReminder("dismiss")}
+                        onClick={() => { const reason = window.prompt("Why lazy right now?") ?? ""; handleReminder("lazy", reason); }}
                         disabled={!now.next_best_action.reminder_id || reminderSubmitting}
                       >
-                        Dismiss
+                        Lazy
                       </button>
                     </div>
                   </div>
@@ -827,7 +819,7 @@ export default function App() {
                 <button
                   className="rounded-full border border-slate/20 px-4 py-2 text-sm"
                   onClick={handleSave}
-                  disabled={!parsedItems.length}
+                  disabled={!parsedItems.length || parsedItems.some((item) => item.parse_error)}
                 >
                   Save
                 </button>
@@ -857,6 +849,7 @@ export default function App() {
                           setParsedItems(updated);
                         }}
                       />
+                      {item.parse_error && (<p className="mt-2 text-xs text-red-600">{item.parse_error}</p>)}
                       <div className="mt-3 grid gap-3 md:grid-cols-2">
                         <input
                           className="rounded-lg border border-slate/20 p-2 text-sm"
@@ -923,6 +916,7 @@ export default function App() {
                           />
                         )}
                       </div>
+                      {item.parse_error && (<p className="mt-2 text-xs text-red-600">{item.parse_error}</p>)}
                       <div className="mt-3 grid gap-3 md:grid-cols-2">
                         <input
                           className="rounded-lg border border-slate/20 p-2 text-sm"
@@ -1087,40 +1081,26 @@ export default function App() {
           </section>
         )}
 
-        {page === "Policy" && settings && (
+        {page === "Nudges" && settings && (
           <section className="rounded-3xl bg-white p-6 shadow">
-            <h2 className="text-lg font-semibold">Policy settings</h2>
-            <div className="mt-6 grid gap-4 md:grid-cols-3">
-              {policyPresets.map((preset) => (
-                <button
-                  key={preset.key}
-                  className="rounded-2xl border border-slate/20 p-4 text-left"
-                  onClick={() => updateSettings(preset.values).then(refreshSettings)}
-                >
-                  <p className="text-sm font-semibold">{preset.label}</p>
-                  <p className="text-xs text-slate">
-                    Budget {preset.values.daily_budget} • Quiet{" "}
-                    {preset.values.quiet_hours_start}–{preset.values.quiet_hours_end}
-                  </p>
-                </button>
-              ))}
-            </div>
+            <h2 className="text-lg font-semibold">Nudge settings</h2>
             <details className="mt-6 rounded-2xl border border-slate/10 p-4">
-              <summary className="cursor-pointer text-sm font-semibold text-slate">
-                Advanced settings
-              </summary>
+              <summary className="cursor-pointer text-sm font-semibold text-slate">Focus settings</summary>
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <label className="space-y-2 text-sm">
-                  <span className="text-slate">Daily notification budget</span>
-                  <input
+                  <span className="text-slate">Reminder intensity</span>
+                  <select
                     className="w-full rounded-xl border border-slate/20 p-3"
-                    type="number"
-                    min={1}
-                    value={settings.daily_budget}
-                    onChange={(event) =>
-                      handleSettingsChange("daily_budget", Number(event.target.value))
-                    }
-                  />
+                    value={settings.daily_budget <= 4 ? "low" : settings.daily_budget <= 8 ? "med" : "high"}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      handleSettingsChange("daily_budget", value === "low" ? 4 : value === "med" ? 8 : 12);
+                    }}
+                  >
+                    <option value="low">Low</option>
+                    <option value="med">Medium</option>
+                    <option value="high">High</option>
+                  </select>
                 </label>
                 <label className="space-y-2 text-sm">
                   <span className="text-slate">Quiet hours start</span>
@@ -1163,96 +1143,30 @@ export default function App() {
 
         {page === "Insights" && insights && (
           <section className="grid gap-6 lg:grid-cols-2">
-            {summary && (
-              <div className="rounded-3xl bg-white p-6 shadow lg:col-span-2">
-                <h2 className="text-lg font-semibold">Weekly Summary</h2>
-                <div className="mt-3 grid gap-3 md:grid-cols-4">
-                  <div className="rounded-2xl border border-slate/10 p-4">
-                    <p className="text-xs uppercase text-slate">Completion rate</p>
-                    <p className="text-lg font-semibold">
-                      {Math.round(summary.metrics.completion_rate * 100)}%
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-slate/10 p-4">
-                    <p className="text-xs uppercase text-slate">Notifications/day</p>
-                    <p className="text-lg font-semibold">
-                      {summary.metrics.notifications_per_day}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-slate/10 p-4">
-                    <p className="text-xs uppercase text-slate">Notifs per completion</p>
-                    <p className="text-lg font-semibold">
-                      {summary.metrics.notifications_per_completion}
-                    </p>
-                  </div>
-                  <div className="rounded-2xl border border-slate/10 p-4">
-                    <p className="text-xs uppercase text-slate">Missed proxy</p>
-                    <p className="text-lg font-semibold">{summary.metrics.missed_rate_proxy}</p>
-                  </div>
-                </div>
-                <p className="mt-4 text-sm text-slate">{summary.narrative}</p>
-                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate">
-                  {summary.recommendations.map((rec, index) => (
-                    <li key={index}>{rec}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
             <div className="rounded-3xl bg-white p-6 shadow">
-              <h2 className="text-lg font-semibold">Notifications per day</h2>
-              <div className="mt-4 h-64">
-                <ResponsiveContainer>
-                  <BarChart data={insights.notifications_per_day}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis />
-                    <Tooltip />
-                    <Bar dataKey="value" fill="#0f172a" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+              <h2 className="text-lg font-semibold">Completion rate</h2>
+              <p className="mt-3 text-sm">Baseline: {Math.round(insights.completion_rate_baseline * 100)}%</p>
+              <p className="text-sm">Adaptive: {Math.round(insights.completion_rate_adaptive * 100)}%</p>
             </div>
             <div className="rounded-3xl bg-white p-6 shadow">
-              <h2 className="text-lg font-semibold">Completions per day</h2>
-              <div className="mt-4 h-64">
-                <ResponsiveContainer>
-                  <LineChart data={insights.completions_per_day}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="value" stroke="#16a34a" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+              <h2 className="text-lg font-semibold">Best hours</h2>
+              <ul className="mt-3 space-y-2 text-sm text-slate">
+                {insights.best_hours.map((hour) => (
+                  <li key={hour.hour}>{hour.hour.toString().padStart(2, "0")}:00 · {hour.completion_rate} completions</li>
+                ))}
+              </ul>
             </div>
-            <div className="rounded-3xl bg-white p-6 shadow">
-              <h2 className="text-lg font-semibold">Missed rate proxy</h2>
-              <div className="mt-4 h-64">
-                <ResponsiveContainer>
-                  <AreaChart data={insights.missed_rate_proxy}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis />
-                    <Tooltip />
-                    <Area dataKey="value" stroke="#f97316" fill="#fed7aa" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-            <div className="rounded-3xl bg-white p-6 shadow">
-              <h2 className="text-lg font-semibold">Notifications per completion</h2>
-              <div className="mt-4 h-64">
-                <ResponsiveContainer>
-                  <LineChart data={insights.notifications_per_completion}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" />
-                    <YAxis />
-                    <Tooltip />
-                    <Line type="monotone" dataKey="value" stroke="#2563eb" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+            <div className="rounded-3xl bg-white p-6 shadow lg:col-span-2">
+              <h2 className="text-lg font-semibold">Wasted nudges</h2>
+              <ul className="mt-3 space-y-2 text-sm text-slate">
+                {insights.wasted_nudges.length ? insights.wasted_nudges.map((item) => (
+                  <li key={item.hour}>{item.hour.toString().padStart(2, "0")}:00 · {item.count} ignores</li>
+                )) : <li>No late-hour waste detected.</li>}
+              </ul>
+              <h3 className="mt-4 text-sm font-semibold">Recommendations</h3>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate">
+                {insights.recommendations.map((rec, idx) => <li key={idx}>{rec}</li>)}
+              </ul>
             </div>
           </section>
         )}

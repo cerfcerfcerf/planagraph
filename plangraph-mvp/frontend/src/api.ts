@@ -62,10 +62,10 @@ export function fetchNow(): Promise<NowResponse> {
   return request("/now");
 }
 
-export function reminderAction(id: number, action: string) {
+export function reminderAction(id: number, action: string, reason?: string) {
   return request(`/reminders/${id}/action`, {
     method: "POST",
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({ action, reason }),
   });
 }
 

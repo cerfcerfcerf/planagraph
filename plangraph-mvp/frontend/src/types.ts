@@ -11,6 +11,7 @@ export type ParseItem = {
   notes: string | null;
   recurrence_suggestions?: RecurrenceSuggestion[] | null;
   task_type?: string | null;
+  parse_error?: string | null;
 };
 
 export type Task = {
@@ -79,12 +80,11 @@ export type NowResponse = {
 };
 
 export type InsightsResponse = {
-  notifications_per_day: { date: string; value: number }[];
-  completions_per_day: { date: string; value: number }[];
-  missed_rate_proxy: { date: string; value: number }[];
-  notifications_per_completion: { date: string; value: number }[];
-  stale_reminder_rate: { date: string; value: number }[];
-  median_completion_delay: { date: string; value: number }[];
+  completion_rate_baseline: number;
+  completion_rate_adaptive: number;
+  best_hours: { hour: number; completion_rate: number }[];
+  wasted_nudges: { hour: number; count: number }[];
+  recommendations: string[];
 };
 
 export type InsightsSummary = {
@@ -128,4 +128,5 @@ export type RecurrenceSuggestion = {
 export type ParsedItemWithSuggestions = ParseItem & {
   recurrence_suggestions?: RecurrenceSuggestion[] | null;
   task_type?: string | null;
+  parse_error?: string | null;
 };
