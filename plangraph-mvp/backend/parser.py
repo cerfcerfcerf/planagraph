@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 
 from schemas import ParseItem
 
 WEEKDAYS = {
+    "mon": 0,
     "monday": 0,
+    "tue": 1,
     "tuesday": 1,
+    "wed": 2,
     "wednesday": 2,
+    "thu": 3,
     "thursday": 3,
+    "fri": 4,
     "friday": 4,
+    "sat": 5,
     "saturday": 5,
+    "sun": 6,
     "sunday": 6,
 }
+TIME_TOKEN = r"(\d{1,2}(?::\d{2}|\.\d{2})?\s*(?:am|pm)?)"
+RANGE_PATTERN = re.compile(rf"\b{TIME_TOKEN}\s*(?:-|–|to)\s*{TIME_TOKEN}\b", re.IGNORECASE)
+SINGLE_TIME_PATTERN = re.compile(rf"\b{TIME_TOKEN}\b", re.IGNORECASE)
+ISO_DATE_PATTERN = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+SLASH_DATE_PATTERN = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
 
 
 def _next_weekday(base: date, target: int) -> date:
@@ -21,72 +33,154 @@ def _next_weekday(base: date, target: int) -> date:
     return base + timedelta(days=days_ahead or 7)
 
 
-def _extract_time(text: str) -> time | None:
-    match = re.search(r"\b(\d{1,2}):(\d{2})\b", text)
-    if not match:
+def _parse_time_token(token: str) -> time | None:
+    raw = token.strip().lower().replace(" ", "").replace(".", ":")
+    period = None
+    if raw.endswith("am") or raw.endswith("pm"):
+        period = raw[-2:]
+        raw = raw[:-2]
+    if ":" in raw:
+        hour_text, minute_text = raw.split(":", 1)
+    else:
+        hour_text, minute_text = raw, "00"
+    if not hour_text.isdigit() or not minute_text.isdigit():
         return None
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    if hour > 23 or minute > 59:
+    hour = int(hour_text)
+    minute = int(minute_text)
+    if minute > 59:
+        return None
+    if period:
+        if hour < 1 or hour > 12:
+            return None
+        if period == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+    elif hour > 23:
         return None
     return time(hour=hour, minute=minute)
 
 
+def _extract_date(text: str, today: date) -> tuple[date | None, str | None]:
+    lowered = text.lower()
+    if "today" in lowered:
+        return today, None
+    if "tomorrow" in lowered:
+        return today + timedelta(days=1), None
+    for label, weekday in WEEKDAYS.items():
+        if re.search(rf"\b{label}\b", lowered):
+            return _next_weekday(today, weekday), None
+    iso_match = ISO_DATE_PATTERN.search(text)
+    if iso_match:
+        try:
+            return date.fromisoformat(iso_match.group(0)), None
+        except ValueError:
+            return None, "Invalid ISO date"
+    slash_match = SLASH_DATE_PATTERN.search(text)
+    if slash_match:
+        first = int(slash_match.group(1))
+        second = int(slash_match.group(2))
+        year = int(slash_match.group(3))
+        # Default is DD/MM/YYYY.
+        if first <= 12 and second <= 12:
+            return None, "Ambiguous slash date; use YYYY-MM-DD or spell month"
+        day, month = first, second
+        try:
+            return date(year, month, day), None
+        except ValueError:
+            return None, "Invalid DD/MM/YYYY date"
+    return None, None
+
+
 def _extract_time_range(text: str) -> tuple[time, time] | None:
-    match = re.search(r"\b(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\b", text)
+    match = RANGE_PATTERN.search(text)
     if not match:
         return None
-    start = _extract_time(match.group(1))
-    end = _extract_time(match.group(2))
+    start = _parse_time_token(match.group(1))
+    end = _parse_time_token(match.group(2))
     if not start or not end:
         return None
     return start, end
 
 
-def _extract_leading_time(text: str) -> tuple[time, str] | None:
-    match = re.match(r"^\s*(\d{1,2}:\d{2})\s*[–-]\s*(.+)$", text)
+def _extract_single_time(text: str) -> time | None:
+    range_match = RANGE_PATTERN.search(text)
+    cleaned = text
+    if range_match:
+        cleaned = text.replace(range_match.group(0), " ")
+    match = SINGLE_TIME_PATTERN.search(cleaned)
     if not match:
         return None
-    start = _extract_time(match.group(1))
-    if not start:
-        return None
-    return start, match.group(2).strip()
+    return _parse_time_token(match.group(1))
 
 
-def _extract_date(text: str, today: date) -> date | None:
-    lowered = text.lower()
-    if "today" in lowered:
-        return today
-    if "tomorrow" in lowered:
-        return today + timedelta(days=1)
-    for name, weekday in WEEKDAYS.items():
-        if name in lowered:
-            return _next_weekday(today, weekday)
-    match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", text)
-    if match:
-        return date.fromisoformat(match.group(0))
-    return None
+def _strip_markers(text: str) -> str:
+    lowered = text
+    lowered = RANGE_PATTERN.sub("", lowered)
+    lowered = ISO_DATE_PATTERN.sub("", lowered)
+    lowered = SLASH_DATE_PATTERN.sub("", lowered)
+    lowered = re.sub(r"\b(today|tomorrow|mon|monday|tue|tuesday|wed|wednesday|thu|thursday|fri|friday|sat|saturday|sun|sunday)\b", "", lowered, flags=re.IGNORECASE)
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered.strip(" -:,.")
+
+
+def _build_item_from_line(line: str, today: date) -> ParseItem:
+    parsed_date, date_error = _extract_date(line, today)
+    line_date = parsed_date or today
+    time_range = _extract_time_range(line)
+    due_time = _extract_single_time(line)
+    title = _strip_markers(line) or line.strip()
+
+    if date_error:
+        return ParseItem(title=title, date=None, parse_error=date_error)
+
+    if time_range:
+        start, end = time_range
+        start_dt = datetime.combine(line_date, start)
+        end_dt = datetime.combine(line_date, end)
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        return ParseItem(
+            title=title,
+            date=line_date.isoformat(),
+            window_start=start_dt.isoformat(),
+            window_end=end_dt.isoformat(),
+            due_time=None,
+            confidence=0.9,
+        )
+
+    if due_time:
+        return ParseItem(
+            title=title,
+            date=line_date.isoformat(),
+            due_time=due_time.strftime("%H:%M"),
+            confidence=0.9,
+        )
+
+    return ParseItem(
+        title=title,
+        date=line_date.isoformat(),
+        parse_error="Missing or invalid time. Use formats like 20:00, 20.00, 8pm, or 20:00-23:00",
+        confidence=0.2,
+    )
+
+
+def deterministic_parse(text: str) -> list[ParseItem]:
+    today = date.today()
+    items: list[ParseItem] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        items.append(_build_item_from_line(line, today))
+    return items
 
 
 def infer_priority(title: str, notes: str | None = None) -> str:
-    text = f"{title} {notes or ''}".strip()
-    lowered = text.lower()
-    high_keywords = [
-        "exam",
-        "test",
-        "submit",
-        "due",
-        "meeting",
-        "flight",
-        "doctor",
-        "medication",
-        "visa",
-        "deadline",
-    ]
-    low_keywords = ["optional", "maybe", "if time", "chill"]
-    if any(keyword in lowered for keyword in high_keywords):
+    lowered = f"{title} {notes or ''}".lower()
+    if any(keyword in lowered for keyword in ["exam", "test", "submit", "due", "meeting", "flight", "doctor", "medication", "visa", "deadline"]):
         return "high"
-    if any(keyword in lowered for keyword in low_keywords):
+    if any(keyword in lowered for keyword in ["optional", "maybe", "if time", "chill"]):
         return "low"
     return "med"
 
@@ -109,221 +203,9 @@ def infer_task_type(title: str, notes: str | None = None) -> str:
 
 
 def recurrence_suggestions(title: str, detected_date: date | None = None) -> list[dict]:
+    if not detected_date:
+        return []
     lowered = title.lower()
-    suggestions: list[dict] = []
-    if detected_date and any(keyword in lowered for keyword in ["class", "lecture", "lab"]):
-        weekday = detected_date.strftime("%A").lower()
-        suggestions.append(
-            {
-                "recurrence": "weekly",
-                "recurrence_detail": weekday,
-                "confidence": 0.7,
-            }
-        )
-    return suggestions
-
-
-def _extract_recurrence(text: str) -> tuple[str, str | None]:
-    lowered = text.lower()
-    if "every 2 days" in lowered or "every two days" in lowered:
-        return "every_2_days", None
-    if "every day" in lowered or "daily" in lowered:
-        return "daily", None
-    if "weekly" in lowered:
-        return "weekly", None
-    for name in WEEKDAYS:
-        if name in lowered and "every" in lowered:
-            return "weekly", name
-    return "none", None
-
-
-def _default_window(base_date: date) -> tuple[datetime, datetime]:
-    if base_date == date.today():
-        start = datetime.combine(base_date, time(18, 0))
-        end = datetime.combine(base_date, time(22, 0))
-    else:
-        start = datetime.combine(base_date, time(12, 0))
-        end = datetime.combine(base_date, time(20, 0))
-    return start, end
-
-
-def _duration_minutes(title: str, notes: str | None = None) -> int:
-    lowered = f"{title} {notes or ''}".lower()
-    if any(keyword in lowered for keyword in ["wake", "hygiene", "breakfast", "shower"]):
-        return 30
-    if "commute" in lowered:
-        return 30
-    if any(keyword in lowered for keyword in ["lecture", "lab"]):
-        return 90
-    if any(keyword in lowered for keyword in ["lunch", "dinner"]):
-        return 60
-    if "gym" in lowered:
-        return 90
-    if "homework" in lowered:
-        return 120
-    if "sleep" in lowered:
-        return 420
-    return 30
-
-
-def _to_utc_iso(value: datetime) -> str:
-    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=local_tz)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def deterministic_parse(text: str) -> list[ParseItem]:
-    today = date.today()
-    lines = [line.strip() for line in text.splitlines()]
-    items: list[ParseItem] = []
-
-    current_range: tuple[time, time] | None = None
-    buffer: list[str] = []
-
-    def flush_buffer() -> None:
-        nonlocal buffer, current_range
-        if not buffer:
-            return
-        description = " ".join(buffer).strip()
-        title = buffer[0]
-        notes = " ".join(buffer[1:]).strip() if len(buffer) > 1 else None
-        detected_date = _extract_date(description, today) or today
-        recurrence, recurrence_detail = _extract_recurrence(description)
-        task_type = infer_task_type(title, notes)
-        priority = infer_priority(title, notes)
-        suggestions = recurrence_suggestions(title, detected_date)
-        if task_type in {"meal", "sleep", "medication", "hygiene"} and recurrence == "none":
-            recurrence = "daily"
-            recurrence_detail = "auto-routine"
-        if current_range:
-            start, end = current_range
-            end_date = detected_date
-            if end < start:
-                end_date = detected_date + timedelta(days=1)
-            window_start = _to_utc_iso(datetime.combine(detected_date, start))
-            window_end = _to_utc_iso(datetime.combine(end_date, end))
-            items.append(
-                ParseItem(
-                    title=title,
-                    date=detected_date.isoformat(),
-                    due_time=None,
-                    window_start=window_start,
-                    window_end=window_end,
-                    priority=priority,
-                    recurrence=recurrence,
-                    recurrence_detail=recurrence_detail,
-                    confidence=0.55,
-                    notes=notes,
-                    recurrence_suggestions=suggestions or None,
-                    task_type=task_type,
-                )
-            )
-        else:
-            detected_time = _extract_time(description)
-            if detected_time:
-                due_time = detected_time.strftime("%H:%M")
-                items.append(
-                    ParseItem(
-                        title=title,
-                        date=detected_date.isoformat(),
-                        due_time=due_time,
-                        window_start=None,
-                        window_end=None,
-                        priority=priority,
-                        recurrence=recurrence,
-                        recurrence_detail=recurrence_detail,
-                        confidence=0.5,
-                        notes=notes,
-                        recurrence_suggestions=suggestions or None,
-                        task_type=task_type,
-                    )
-                )
-            else:
-                window_start, window_end = _default_window(detected_date)
-                items.append(
-                    ParseItem(
-                        title=title,
-                        date=detected_date.isoformat(),
-                        due_time=None,
-                        window_start=_to_utc_iso(window_start),
-                        window_end=_to_utc_iso(window_end),
-                        priority=priority,
-                        recurrence=recurrence,
-                        recurrence_detail=recurrence_detail,
-                        confidence=0.45,
-                        notes=notes,
-                        recurrence_suggestions=suggestions or None,
-                        task_type=task_type,
-                    )
-                )
-        buffer = []
-        current_range = None
-
-    for line in lines:
-        if not line:
-            continue
-        range_only = _extract_time_range(line)
-        if range_only and re.fullmatch(r"\s*\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}\s*", line):
-            flush_buffer()
-            current_range = range_only
-            continue
-        leading_time = _extract_leading_time(line) if not range_only else None
-        if leading_time and not current_range:
-            start_time, remainder = leading_time
-            description = remainder
-            detected_date = _extract_date(description, today) or today
-            notes = None
-            task_type = infer_task_type(remainder, notes)
-            priority = infer_priority(remainder, notes)
-            recurrence, recurrence_detail = _extract_recurrence(description)
-            suggestions = recurrence_suggestions(remainder, detected_date)
-            if task_type in {"meal", "sleep", "medication", "hygiene"} and recurrence == "none":
-                recurrence = "daily"
-                recurrence_detail = "auto-routine"
-            if task_type == "sleep":
-                window_start = _to_utc_iso(datetime.combine(detected_date, time(23, 30)))
-                window_end = _to_utc_iso(
-                    datetime.combine(detected_date + timedelta(days=1), time(6, 30))
-                )
-            else:
-                duration = _duration_minutes(remainder, notes)
-                window_start_dt = datetime.combine(detected_date, start_time)
-                window_end_dt = window_start_dt + timedelta(minutes=duration)
-                window_start = _to_utc_iso(window_start_dt)
-                window_end = _to_utc_iso(window_end_dt)
-            items.append(
-                ParseItem(
-                    title=remainder,
-                    date=detected_date.isoformat(),
-                    due_time=None,
-                    window_start=window_start,
-                    window_end=window_end,
-                    priority=priority,
-                    recurrence=recurrence,
-                    recurrence_detail=recurrence_detail,
-                    confidence=0.55,
-                    notes=notes,
-                    recurrence_suggestions=suggestions or None,
-                    task_type=task_type,
-                )
-            )
-            continue
-        if current_range:
-            buffer.append(line)
-            continue
-        if range_only:
-            current_range = range_only
-            remainder = re.sub(r"\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}", "", line).strip()
-            if remainder:
-                buffer.append(remainder)
-                flush_buffer()
-            continue
-        for chunk in re.split(r"[.;]+", line):
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            buffer.append(chunk)
-            flush_buffer()
-    flush_buffer()
-    return items
+    if any(keyword in lowered for keyword in ["class", "lecture", "lab"]):
+        return [{"recurrence": "weekly", "recurrence_detail": detected_date.strftime("%A").lower(), "confidence": 0.7}]
+    return []

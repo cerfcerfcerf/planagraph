@@ -94,7 +94,7 @@ USE_LLM=true
 
 ## Notes
 
-- The LLM is used only for plan parsing. If the model returns invalid JSON or fails schema validation, the backend falls back to the deterministic parser.
+- Parsing is deterministic in MVP mode and always uses the local parser for stable results.
 - Notifications use the browser Notifications API and only fire while the app is open (no background push support).
 - Voice dictation relies on the browser Web Speech API and is best supported in Chromium-based browsers; it may be unavailable in Firefox or privacy-hardened environments.
 
@@ -119,3 +119,12 @@ Enable dev seeding with `APP_ENV=dev`, then:
 ```bash
 curl -X POST http://localhost:8000/seed
 ```
+
+
+## Parser defaults
+
+- One input line maps to at most one parsed task.
+- Supported times: `20:00`, `20.00`, `20`, `8pm`, `8 pm`.
+- Supported ranges: `20:00-23:00`, `20:00 - 23:00`, `20.00 to 23.00`, `20.00–23.00`.
+- Relative dates: `today`, `tomorrow`, weekdays (`mon`/`monday`, etc.).
+- Slash dates default to **DD/MM/YYYY**. Ambiguous slash dates (e.g. `11/12/2026`) return a line-level parse error instead of creating a wrong task.

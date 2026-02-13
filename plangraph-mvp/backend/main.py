@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal, init_db
 from llm_client import LLMClient
-from models import Event, Reminder, Task, Template
+from models import Event, NudgeEvent, Reminder, Task, Template
 from parser import deterministic_parse, infer_priority, infer_task_type, recurrence_suggestions
 from policy import (
     build_explanation,
@@ -50,7 +50,7 @@ from schemas import (
 
 load_dotenv()
 
-USE_LLM = os.getenv("USE_LLM", "true").lower() == "true"
+USE_LLM = os.getenv("USE_LLM", "false").lower() == "true"
 
 app = FastAPI(title="Plangraph (Life OS)")
 
@@ -153,11 +153,7 @@ def _parse_llm_items(text: str) -> list[dict[str, Any]] | None:
 
 
 def _parse_text(text: str) -> ParseResponse:
-    items: list[dict[str, Any]] | None = None
-    if USE_LLM:
-        items = _parse_llm_items(text)
-    if items is None:
-        items = [item.model_dump() for item in deterministic_parse(text)]
+    items = [item.model_dump() for item in deterministic_parse(text)]
     return ParseResponse(items=items)
 
 
@@ -183,34 +179,54 @@ async def create_tasks(
     db: Session = Depends(get_db),
 ) -> TaskListResponse:
     created: list[Task] = []
+    seen_signatures: set[tuple[str, str | None, str | None, str | None]] = set()
+
     for payload in tasks:
         payload_data = payload.model_dump()
-        if payload_data.get("priority") not in {"low", "med", "high"}:
-            payload_data["priority"] = infer_priority(
-                payload_data.get("title", ""), payload_data.get("notes")
-            )
-        payload_data["task_type"] = infer_task_type(
-            payload_data.get("title", ""), payload_data.get("notes")
-        )
-        if payload_data.get("task_type") in {"meal", "sleep", "medication", "hygiene"} and not payload_data.get(
-            "recurrence"
-        ):
-            payload_data["recurrence"] = "daily"
-            payload_data["recurrence_detail"] = "auto-routine"
+        title = (payload_data.get("title") or "").strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="Task title cannot be empty")
+        payload_data["title"] = title
         payload_data["due_at"] = _ensure_utc(payload_data.get("due_at"))
         payload_data["window_start"] = _ensure_utc(payload_data.get("window_start"))
         payload_data["window_end"] = _ensure_utc(payload_data.get("window_end"))
+        if payload_data["window_start"] and payload_data["window_end"] and payload_data["window_start"] >= payload_data["window_end"]:
+            raise HTTPException(status_code=422, detail="window_start must be before window_end")
+
+        signature = (
+            title.lower(),
+            payload_data["due_at"].isoformat() if payload_data["due_at"] else None,
+            payload_data["window_start"].isoformat() if payload_data["window_start"] else None,
+            payload_data["window_end"].isoformat() if payload_data["window_end"] else None,
+        )
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+
+        existing = db.execute(
+            select(Task).where(
+                Task.status == "active",
+                Task.title == title,
+                Task.due_at == payload_data["due_at"],
+                Task.window_start == payload_data["window_start"],
+                Task.window_end == payload_data["window_end"],
+            )
+        ).scalars().first()
+        if existing:
+            continue
+
+        if payload_data.get("priority") not in {"low", "med", "high"}:
+            payload_data["priority"] = infer_priority(title, payload_data.get("notes"))
+        payload_data["task_type"] = infer_task_type(title, payload_data.get("notes"))
+
         task = Task(**payload_data)
         db.add(task)
         db.flush()
         db.add(Event(type="task_created", task_id=task.id, reminder_id=None))
         created.append(task)
+
     db.commit()
-    now = datetime.now(timezone.utc)
     for task in created:
-        target = task.due_at or task.window_start
-        if target and target <= now + timedelta(hours=6):
-            continue
         schedule_reminder(db, task)
     db.commit()
     return TaskListResponse(tasks=[TaskOut.model_validate(task) for task in created])
@@ -230,7 +246,13 @@ async def update_task(
     for field, value in updates.items():
         if field in {"due_at", "window_start", "window_end"}:
             value = _ensure_utc(value)
+        if field == "title" and isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise HTTPException(status_code=422, detail="Task title cannot be empty")
         setattr(task, field, value)
+    if task.window_start and task.window_end and task.window_start >= task.window_end:
+        raise HTTPException(status_code=422, detail="window_start must be before window_end")
     db.add(task)
     if previous_status != "archived" and updates.get("status") == "archived":
         db.add(Event(type="task_skipped", task_id=task.id, reminder_id=None))
@@ -338,27 +360,43 @@ async def reminder_action(
         raise HTTPException(status_code=404, detail="Reminder not found")
     task = db.get(Task, reminder.task_id)
     now = datetime.now(timezone.utc)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    latency_seconds = int((now - reminder.scheduled_for).total_seconds()) if reminder.scheduled_for else None
+
     if payload.action == "done":
         reminder.state = "done"
-        if task:
-            task.status = "completed"
-            db.add(Event(type="task_done", task_id=task.id, reminder_id=reminder.id))
-            if task.recurrence and task.recurrence != "none":
-                if roll_task_forward(task):
-                    schedule_reminder(db, task)
-    elif payload.action == "dismiss":
-        reminder.state = "dismissed"
-        db.add(Event(type="reminder_dismissed", task_id=task.id, reminder_id=reminder.id))
-    elif payload.action in {"snooze_10", "snooze_30"}:
-        minutes = 10 if payload.action == "snooze_10" else 30
+        task.status = "completed"
+        db.add(Event(type="task_done", task_id=task.id, reminder_id=reminder.id))
+        if task.recurrence and task.recurrence != "none" and roll_task_forward(task):
+            schedule_reminder(db, task)
+    elif payload.action == "snooze":
         reminder.state = "snoozed"
-        new_reminder = Reminder(
-            task_id=reminder.task_id, scheduled_for=now + timedelta(minutes=minutes)
-        )
-        db.add(new_reminder)
+        settings = get_settings(db)
+        db.add(Reminder(task_id=reminder.task_id, scheduled_for=now + timedelta(minutes=settings.lead_time_minutes)))
         db.add(Event(type="reminder_snoozed", task_id=task.id, reminder_id=reminder.id))
+    elif payload.action == "ignore":
+        reminder.state = "dismissed"
+        ignores = db.execute(select(NudgeEvent).where(NudgeEvent.task_id == task.id, NudgeEvent.action == "ignore")).scalars().all()
+        if len(ignores) < 1:
+            db.add(Reminder(task_id=reminder.task_id, scheduled_for=now + timedelta(minutes=15)))
+        db.add(Event(type="reminder_ignored", task_id=task.id, reminder_id=reminder.id))
+    elif payload.action == "lazy":
+        reminder.state = "dismissed"
+        db.add(Event(type="reminder_lazy", task_id=task.id, reminder_id=reminder.id, payload_json={"reason": payload.reason}))
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+    db.add(
+        NudgeEvent(
+            task_id=task.id,
+            action=payload.action,
+            reason=payload.reason,
+            latency_seconds=latency_seconds,
+            timestamp=now,
+        )
+    )
     db.commit()
     db.refresh(reminder)
     return ReminderOut.model_validate(reminder)
@@ -366,184 +404,73 @@ async def reminder_action(
 
 @app.get("/insights", response_model=InsightsResponse)
 async def insights(db: Session = Depends(get_db)) -> InsightsResponse:
-    now = datetime.now(timezone.utc).date()
-    start_day = now - timedelta(days=6)
-    days = [(start_day + timedelta(days=idx)).isoformat() for idx in range(7)]
-    events = (
-        db.execute(
-            select(Event).where(
-                Event.ts >= datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    daily: dict[str, dict[str, int]] = {
-        day: {"notifications": 0, "completions": 0, "sent": 0, "expired": 0} for day in days
-    }
-    sent_lookup: dict[int, datetime] = {}
-    completion_delays: dict[str, list[float]] = {day: [] for day in days}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+    events = db.execute(select(NudgeEvent).where(NudgeEvent.timestamp >= cutoff)).scalars().all()
+
+    baseline_events = [e for e in events if e.reason != "adaptive"]
+    adaptive_events = [e for e in events if e.reason == "adaptive"]
+
+    def _completion_rate(collection: list[NudgeEvent]) -> float:
+        if not collection:
+            return 0.0
+        done = sum(1 for event in collection if event.action == "done")
+        return round(done / len(collection), 3)
+
+    done_hours: dict[int, list[str]] = {}
+    wasted_by_hour: dict[int, int] = {}
     for event in events:
-        day = event.ts.date().isoformat()
-        if day not in daily:
-            continue
-        if event.type == "reminder_sent":
-            daily[day]["notifications"] += 1
-            daily[day]["sent"] += 1
-            if event.reminder_id is not None:
-                sent_lookup[event.reminder_id] = event.ts
-        if event.type == "reminder_expired":
-            daily[day]["expired"] += 1
-        if event.type == "task_done":
-            daily[day]["completions"] += 1
-            if event.reminder_id is not None and event.reminder_id in sent_lookup:
-                delay_minutes = (event.ts - sent_lookup[event.reminder_id]).total_seconds() / 60
-                completion_delays[day].append(delay_minutes)
-    notifications_per_day = [
-        {"date": day, "value": daily[day]["notifications"]} for day in days
-    ]
-    completions_per_day = [
-        {"date": day, "value": daily[day]["completions"]} for day in days
-    ]
-    missed_rate_proxy = [
-        {"date": day, "value": max(daily[day]["notifications"] - daily[day]["completions"], 0)}
-        for day in days
-    ]
-    notifications_per_completion = [
-        {
-            "date": day,
-            "value": daily[day]["notifications"] / daily[day]["completions"]
-            if daily[day]["completions"]
-            else daily[day]["notifications"],
-        }
-        for day in days
-    ]
-    stale_reminder_rate = [
-        {
-            "date": day,
-            "value": daily[day]["expired"] / daily[day]["sent"] if daily[day]["sent"] else 0,
-        }
-        for day in days
-    ]
-    median_completion_delay = [
-        {
-            "date": day,
-            "value": round(statistics.median(completion_delays[day]), 2)
-            if completion_delays[day]
-            else 0,
-        }
-        for day in days
-    ]
+        hour = event.timestamp.hour
+        if event.action == "done":
+            done_hours.setdefault(hour, []).append(event.action)
+        if event.action == "ignore" and hour >= 20:
+            wasted_by_hour[hour] = wasted_by_hour.get(hour, 0) + 1
+
+    best_hours = sorted(
+        [{"hour": hour, "completion_rate": len(actions)} for hour, actions in done_hours.items()],
+        key=lambda item: item["completion_rate"],
+        reverse=True,
+    )[:3]
+    wasted_nudges = [{"hour": hour, "count": count} for hour, count in sorted(wasted_by_hour.items())]
+
+    recommendations: list[str] = []
+    if wasted_nudges:
+        recommendations.append("Reduce evening reminders after 20:00; ignores spike late.")
+    if best_hours:
+        recommendations.append(f"Schedule important nudges around {best_hours[0]['hour']:02d}:00 when completion is strongest.")
+    if _completion_rate(adaptive_events) < _completion_rate(baseline_events):
+        recommendations.append("Adaptive mode is underperforming baseline; increase exploration and fallback to baseline lead times.")
+    else:
+        recommendations.append("Adaptive mode is meeting or beating baseline; keep adaptive enabled.")
+
     return InsightsResponse(
-        notifications_per_day=notifications_per_day,
-        completions_per_day=completions_per_day,
-        missed_rate_proxy=missed_rate_proxy,
-        notifications_per_completion=notifications_per_completion,
-        stale_reminder_rate=stale_reminder_rate,
-        median_completion_delay=median_completion_delay,
+        completion_rate_baseline=_completion_rate(baseline_events),
+        completion_rate_adaptive=_completion_rate(adaptive_events),
+        best_hours=best_hours,
+        wasted_nudges=wasted_nudges,
+        recommendations=recommendations[:3],
     )
-
-
-@app.get("/templates", response_model=list[TemplateOut])
-async def list_templates(db: Session = Depends(get_db)) -> list[TemplateOut]:
-    templates = (
-        db.execute(select(Template).order_by(Template.pinned.desc(), Template.used_count.desc()))
-        .scalars()
-        .all()
-    )
-    return [TemplateOut.model_validate(template) for template in templates]
-
-
-@app.post("/templates", response_model=TemplateOut)
-async def create_template(payload: TemplateCreate, db: Session = Depends(get_db)) -> TemplateOut:
-    template = Template(**payload.model_dump())
-    db.add(template)
-    db.commit()
-    db.refresh(template)
-    return TemplateOut.model_validate(template)
-
-
-@app.post("/templates/{template_id}/use", response_model=TaskOut)
-async def use_template(template_id: int, db: Session = Depends(get_db)) -> TaskOut:
-    template = db.get(Template, template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-    now = datetime.now(timezone.utc)
-    window_start = now.replace(minute=0, second=0, microsecond=0)
-    window_end = window_start + timedelta(minutes=template.default_duration_min)
-    task = Task(
-        title=template.title,
-        notes=None,
-        window_start=window_start,
-        window_end=window_end,
-        priority=template.default_priority,
-        task_type=template.default_type,
-        recurrence=None,
-        recurrence_detail=None,
-    )
-    db.add(task)
-    template.used_count += 1
-    template.last_used = now
-    db.commit()
-    db.refresh(task)
-    return TaskOut.model_validate(task)
 
 
 @app.get("/insights/summary", response_model=InsightsSummaryResponse)
 async def insights_summary(db: Session = Depends(get_db)) -> InsightsSummaryResponse:
     insights_payload = await insights(db)
-    total_notifications = sum(item["value"] for item in insights_payload.notifications_per_day)
-    total_completions = sum(item["value"] for item in insights_payload.completions_per_day)
-    completion_rate = (
-        total_completions / total_notifications if total_notifications else 0.0
-    )
-    notifications_per_day = total_notifications / 7
-    notifications_per_completion = (
-        total_notifications / total_completions if total_completions else total_notifications
-    )
-    missed_rate = sum(item["value"] for item in insights_payload.missed_rate_proxy) / 7
-    stale_rate = sum(item["value"] for item in insights_payload.stale_reminder_rate) / 7
-    median_delay = sum(item["value"] for item in insights_payload.median_completion_delay) / 7
+    completion_rate = insights_payload.completion_rate_adaptive
+    baseline_rate = insights_payload.completion_rate_baseline
     metrics = {
         "completion_rate": round(completion_rate, 2),
-        "notifications_per_day": round(notifications_per_day, 2),
-        "notifications_per_completion": round(notifications_per_completion, 2),
-        "missed_rate_proxy": round(missed_rate, 2),
-        "stale_reminder_rate": round(stale_rate, 2),
-        "median_completion_delay": round(median_delay, 2),
+        "notifications_per_day": 0.0,
+        "notifications_per_completion": 0.0,
+        "missed_rate_proxy": 0.0,
+        "stale_reminder_rate": 0.0,
+        "median_completion_delay": 0.0,
     }
-    if USE_LLM:
-        try:
-            response = LLMClient().summarize_insights(metrics)
-            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            parsed = json.loads(content)
-            narrative = parsed.get("narrative", "")
-            recommendations = parsed.get("recommendations", [])
-            if narrative and isinstance(recommendations, list) and recommendations:
-                return InsightsSummaryResponse(
-                    narrative=narrative,
-                    recommendations=recommendations[:3],
-                    metrics=metrics,
-                )
-        except (RuntimeError, json.JSONDecodeError):
-            pass
     narrative = (
-        "This week shows a steady rhythm of reminders and completions. "
-        f"Completion rate averaged {metrics['completion_rate'] * 100:.0f}% with "
-        f"{metrics['notifications_per_day']} notifications per day. "
-        f"Stale reminders averaged {metrics['stale_reminder_rate'] * 100:.0f}% and "
-        f"median completion delay was {metrics['median_completion_delay']} minutes. "
-        "Use the missed-rate proxy to see where nudges might be too early. "
-        "Keep experiments small and adjust settings weekly."
+        f"Adaptive completion is {completion_rate*100:.0f}% vs baseline {baseline_rate*100:.0f}%. "
+        "Focus reminders on your best hours and reduce low-value late nudges."
     )
-    recommendations = [
-        "Schedule high-priority work in your strongest hours.",
-        "Reduce notification budget if completions lag.",
-        "Use flexible windows for tasks without fixed times.",
-    ]
     return InsightsSummaryResponse(
         narrative=narrative,
-        recommendations=recommendations,
+        recommendations=insights_payload.recommendations,
         metrics=metrics,
     )
 

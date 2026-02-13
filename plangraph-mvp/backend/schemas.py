@@ -31,6 +31,7 @@ class ParseItem(APIModel):
     notes: str | None = None
     recurrence_suggestions: list[dict] | None = None
     task_type: str | None = None
+    parse_error: str | None = None
 
 
 class ParseResponse(APIModel):
@@ -157,7 +158,8 @@ class NowResponse(APIModel):
 
 
 class ReminderActionRequest(APIModel):
-    action: Literal["done", "snooze_10", "snooze_30", "dismiss"]
+    action: Literal["done", "snooze", "ignore", "lazy"]
+    reason: str | None = None
 
 
 class InsightSeries(APIModel):
@@ -166,12 +168,11 @@ class InsightSeries(APIModel):
 
 
 class InsightsResponse(APIModel):
-    notifications_per_day: list[dict]
-    completions_per_day: list[dict]
-    missed_rate_proxy: list[dict]
-    notifications_per_completion: list[dict]
-    stale_reminder_rate: list[dict]
-    median_completion_delay: list[dict]
+    completion_rate_baseline: float
+    completion_rate_adaptive: float
+    best_hours: list[dict]
+    wasted_nudges: list[dict]
+    recommendations: list[str]
 
 
 class InsightsSummaryResponse(APIModel):
